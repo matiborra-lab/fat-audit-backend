@@ -202,6 +202,15 @@ app.post('/api/sucursales', requireAdmin, async (req, res) => {
       'INSERT INTO sucursales (nombre, codigo, direccion) VALUES ($1,$2,$3) RETURNING *',
       [nombre, codigo || null, direccion || null]
     );
+    // Horario por defecto (los 7 días, 08-16 diurno / 16-00 nocturno,
+    // habilitados) - se edita después desde la ficha de la sucursal.
+    const filasHorario = [];
+    for (let dia = 0; dia <= 6; dia++) {
+      filasHorario.push([rows[0].id, dia, 'DIURNO', true, '08:00', '16:00']);
+      filasHorario.push([rows[0].id, dia, 'NOCTURNO', true, '16:00', '00:00']);
+    }
+    await db.bulkInsert(db.pool, 'sucursal_horarios_turno',
+      ['sucursal_id', 'dia_semana', 'turno_tipo', 'habilitado', 'hora_desde', 'hora_hasta'], filasHorario, 'id');
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.code === '23505') return res.status(400).json({ error: 'Ya existe una sucursal con ese código' });
@@ -209,29 +218,77 @@ app.post('/api/sucursales', requireAdmin, async (req, res) => {
   }
 });
 
-app.patch('/api/sucursales/:id', async (req, res) => {
-  // Un Gerente puede configurar SOLO el horario de turnos de su propia
-  // sucursal (nombre/código/dirección/activo siguen siendo solo de Admin).
-  const esGerentePropia = req.usuario.rol === 'GERENTE' && req.usuario.sucursal_id === Number(req.params.id);
-  if (req.usuario.rol !== 'ADMIN' && !esGerentePropia) {
-    return res.status(403).json({ error: 'No tenés permiso para editar esta sucursal' });
-  }
-  const { turno_diurno_desde, turno_diurno_hasta, turno_nocturno_desde, turno_nocturno_hasta } = req.body;
-  const { nombre, codigo, direccion, activo } = esGerentePropia ? {} : req.body;
+app.patch('/api/sucursales/:id', requireAdmin, async (req, res) => {
+  const { nombre, codigo, direccion, activo } = req.body;
   try {
     const { rows } = await db.query(
       `UPDATE sucursales SET nombre = COALESCE($1,nombre), codigo = COALESCE($2,codigo),
-       direccion = COALESCE($3,direccion), activo = COALESCE($4,activo),
-       turno_diurno_desde = COALESCE($6,turno_diurno_desde), turno_diurno_hasta = COALESCE($7,turno_diurno_hasta),
-       turno_nocturno_desde = COALESCE($8,turno_nocturno_desde), turno_nocturno_hasta = COALESCE($9,turno_nocturno_hasta)
+       direccion = COALESCE($3,direccion), activo = COALESCE($4,activo)
        WHERE id = $5 RETURNING *`,
-      [nombre ?? null, codigo ?? null, direccion ?? null, activo ?? null, req.params.id,
-        turno_diurno_desde ?? null, turno_diurno_hasta ?? null, turno_nocturno_desde ?? null, turno_nocturno_hasta ?? null]
+      [nombre ?? null, codigo ?? null, direccion ?? null, activo ?? null, req.params.id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Sucursal no encontrada' });
     res.json(rows[0]);
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// Un Gerente puede configurar el horario de turnos SOLO de su propia
+// sucursal; Admin, de cualquiera. Única fuente de verdad de horarios (ver
+// sucursal_horarios_turno) - Gestionar turnos solo lee esto.
+function puedeConfigurarHorarioTurnos(usuario, sucursalId) {
+  if (usuario.rol === 'ADMIN') return true;
+  return usuario.rol === 'GERENTE' && usuario.sucursal_id === Number(sucursalId);
+}
+
+app.get('/api/sucursales/:id/horario-turnos', async (req, res) => {
+  if (!puedeAccederSucursal(req.usuario, req.params.id)) return res.status(403).json({ error: 'No tenés acceso a esa sucursal' });
+  try {
+    const { rows } = await db.query(
+      'SELECT dia_semana, turno_tipo, habilitado, hora_desde, hora_hasta FROM sucursal_horarios_turno WHERE sucursal_id = $1 ORDER BY dia_semana, turno_tipo',
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Reemplaza toda la configuración semanal de una sucursal de una vez.
+// Body: { dias: [{ dia_semana, turno_tipo, habilitado, hora_desde, hora_hasta }, ...] } (14 entradas: 7 días x 2 turnos)
+app.put('/api/sucursales/:id/horario-turnos', async (req, res) => {
+  if (!puedeConfigurarHorarioTurnos(req.usuario, req.params.id)) return res.status(403).json({ error: 'No tenés permiso para configurar el horario de esta sucursal' });
+  const { dias } = req.body;
+  if (!Array.isArray(dias) || !dias.length) return res.status(400).json({ error: 'Falta el campo: dias' });
+  for (const d of dias) {
+    if (d.dia_semana < 0 || d.dia_semana > 6 || !['DIURNO', 'NOCTURNO'].includes(d.turno_tipo) || !d.hora_desde || !d.hora_hasta) {
+      return res.status(400).json({ error: 'Cada entrada necesita: dia_semana (0-6), turno_tipo, hora_desde, hora_hasta' });
+    }
+  }
+  const client = await db.pool.connect();
+  try {
+    await client.query('BEGIN');
+    for (const d of dias) {
+      await client.query(
+        `INSERT INTO sucursal_horarios_turno (sucursal_id, dia_semana, turno_tipo, habilitado, hora_desde, hora_hasta)
+         VALUES ($1,$2,$3,$4,$5,$6)
+         ON CONFLICT (sucursal_id, dia_semana, turno_tipo)
+         DO UPDATE SET habilitado = EXCLUDED.habilitado, hora_desde = EXCLUDED.hora_desde, hora_hasta = EXCLUDED.hora_hasta`,
+        [req.params.id, d.dia_semana, d.turno_tipo, d.habilitado !== false, d.hora_desde, d.hora_hasta]
+      );
+    }
+    await client.query('COMMIT');
+    const { rows } = await client.query(
+      'SELECT dia_semana, turno_tipo, habilitado, hora_desde, hora_hasta FROM sucursal_horarios_turno WHERE sucursal_id = $1 ORDER BY dia_semana, turno_tipo',
+      [req.params.id]
+    );
+    res.json(rows);
+  } catch (err) {
+    await client.query('ROLLBACK');
+    res.status(400).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
@@ -249,6 +306,11 @@ app.get('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
     if (req.usuario.rol === 'GERENTE') {
       params.push(req.usuario.sucursal_id, 'COLABORADOR');
       sql += ` AND u.sucursal_id = $1 AND u.rol = $2`;
+    } else if (req.query.sucursal_id) {
+      // Admin/Auditor: filtro opcional para ver el personal de UNA sucursal
+      // (ej: sección "Personal" en la ficha de Sucursales).
+      params.push(req.query.sucursal_id);
+      sql += ` AND u.sucursal_id = $${params.length}`;
     }
     sql += ' ORDER BY u.creado_en DESC';
     const { rows } = await db.query(sql, params);

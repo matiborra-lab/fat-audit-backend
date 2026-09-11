@@ -9,16 +9,23 @@ CREATE TABLE sucursales (
   codigo                TEXT UNIQUE,
   direccion             TEXT,
   activo                BOOLEAN NOT NULL DEFAULT true,
-  -- Horario de cada turno, configurable por sucursal - la grilla de
-  -- "Gestionar turnos" completa fecha_hora/duracion_minutos automaticamente
-  -- a partir de esto cuando se elige DIURNO o NOCTURNO (ver turno_tipo en
-  -- schedule_events); nocturno_hasta < nocturno_desde se interpreta como
-  -- que cruza la medianoche.
-  turno_diurno_desde    TIME NOT NULL DEFAULT '08:00',
-  turno_diurno_hasta    TIME NOT NULL DEFAULT '16:00',
-  turno_nocturno_desde  TIME NOT NULL DEFAULT '16:00',
-  turno_nocturno_hasta  TIME NOT NULL DEFAULT '00:00',
   creado_en             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Disponibilidad de cada turno (DIURNO/NOCTURNO) por dia de la semana,
+-- configurable por sucursal desde la ficha de Sucursales - unica fuente de
+-- verdad de horarios (Gestionar turnos solo LEE esto, no lo edita). Si un
+-- dia+turno no esta habilitado, no se puede asignar gente ahi. hora_hasta <
+-- hora_desde se interpreta como que el turno cruza la medianoche.
+CREATE TABLE sucursal_horarios_turno (
+  id            SERIAL PRIMARY KEY,
+  sucursal_id   INTEGER NOT NULL REFERENCES sucursales(id) ON DELETE CASCADE,
+  dia_semana    INTEGER NOT NULL CHECK (dia_semana BETWEEN 0 AND 6),  -- 0=domingo..6=sabado, Date#getDay
+  turno_tipo    TEXT NOT NULL CHECK (turno_tipo IN ('DIURNO', 'NOCTURNO')),
+  habilitado    BOOLEAN NOT NULL DEFAULT true,
+  hora_desde    TIME NOT NULL,
+  hora_hasta    TIME NOT NULL,
+  UNIQUE (sucursal_id, dia_semana, turno_tipo)
 );
 
 -- Un GERENTE pertenece a una unica sucursal (sucursal_id fijo) - ADMIN y

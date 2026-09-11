@@ -69,34 +69,59 @@ function generarFechas(fechaHoraInicial, recurrencia) {
   return fechas;
 }
 
-// Para "programar asignaciones": una fecha por cada día entre fechaDesde y
-// fechaHasta (o fechaDesde + DIAS_VENTANA_SIN_FIN si no hay fechaHasta) cuyo
-// día de semana (0=domingo..6=sábado, igual que Date#getDay) esté en
-// diasSemana. `horaHHMM` fija la hora de cada ocurrencia.
-function generarFechasPorDiaSemana(fechaDesde, fechaHasta, diasSemana, horaHHMM) {
+// Para "programar asignaciones": una ocurrencia por cada día entre
+// fechaDesde y fechaHasta (o fechaDesde + DIAS_VENTANA_SIN_FIN si no hay
+// fechaHasta) cuyo día de semana (0=domingo..6=sábado, igual que
+// Date#getDay) esté en diasSemana Y tenga ese turno habilitado en
+// `horarios` (ver obtenerHorariosSucursal) - un día sin ese turno
+// habilitado simplemente no genera ocurrencia ahí.
+function generarOcurrenciasTurnoProgramado(fechaDesde, fechaHasta, diasSemana, horarios, turnoTipo) {
   const desde = new Date(`${fechaDesde}T00:00:00`);
   const hasta = fechaHasta ? new Date(`${fechaHasta}T00:00:00`) : new Date(desde.getTime() + DIAS_VENTANA_SIN_FIN * 86400000);
   const set = new Set(diasSemana.map(Number));
-  const fechas = [];
+  const ocurrencias = [];
   const cursor = new Date(desde);
-  while (cursor <= hasta && fechas.length < MAX_OCURRENCIAS) {
-    if (set.has(cursor.getDay())) {
-      const [h, m] = horaHHMM.split(':').map(Number);
-      fechas.push(new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate(), h, m));
+  while (cursor <= hasta && ocurrencias.length < MAX_OCURRENCIAS) {
+    const dia = cursor.getDay();
+    if (set.has(dia)) {
+      const horario = horarios.get(`${dia}|${turnoTipo}`);
+      if (horario?.habilitado) ocurrencias.push(armarOcurrencia(cursor, horario));
     }
     cursor.setDate(cursor.getDate() + 1);
   }
-  return fechas;
+  return ocurrencias;
 }
 
-// Calcula fecha_hora/duracion_minutos de un turno a partir del horario
-// configurado en la sucursal para DIURNO/NOCTURNO (ver sucursales.turno_*) -
-// así el horario se define una sola vez por sucursal y cada asignación solo
-// elige el tipo de turno, sin volver a tipear horarios.
-function horarioDeTurno(sucursal, turnoTipo) {
-  const desde = turnoTipo === 'DIURNO' ? sucursal.turno_diurno_desde : sucursal.turno_nocturno_desde;
-  const hasta = turnoTipo === 'DIURNO' ? sucursal.turno_diurno_hasta : sucursal.turno_nocturno_hasta;
-  return { desde: desde.slice(0, 5), hasta: hasta.slice(0, 5) };
+// Horario de turnos: única fuente de verdad es sucursal_horarios_turno,
+// configurable por día de semana desde la ficha de Sucursales (ver
+// server/index.js) - acá solo se LEE para saber si un día+turno está
+// habilitado y con qué horario, nunca se edita desde el calendario.
+async function obtenerHorariosSucursal(sucursalId) {
+  const { rows } = await db.query(
+    'SELECT dia_semana, turno_tipo, habilitado, hora_desde, hora_hasta FROM sucursal_horarios_turno WHERE sucursal_id = $1',
+    [sucursalId]
+  );
+  const mapa = new Map();
+  for (const r of rows) {
+    mapa.set(`${r.dia_semana}|${r.turno_tipo}`, { habilitado: r.habilitado, desde: r.hora_desde.slice(0, 5), hasta: r.hora_hasta.slice(0, 5) });
+  }
+  return mapa;
+}
+
+function diaSemanaDeFecha(fechaISO) {
+  return new Date(`${fechaISO}T00:00:00`).getDay();
+}
+
+// fechaBase (Date, solo se usan año/mes/día) + horario {desde,hasta} (HH:MM)
+// -> { inicio, duracionMinutos }. hasta <= desde se interpreta como que el
+// turno cruza la medianoche.
+function armarOcurrencia(fechaBase, horario) {
+  const [h, m] = horario.desde.split(':').map(Number);
+  const inicio = new Date(fechaBase.getFullYear(), fechaBase.getMonth(), fechaBase.getDate(), h, m);
+  const [h2, m2] = horario.hasta.split(':').map(Number);
+  const fin = new Date(fechaBase.getFullYear(), fechaBase.getMonth(), fechaBase.getDate(), h2, m2);
+  if (fin <= inicio) fin.setDate(fin.getDate() + 1);
+  return { inicio, duracionMinutos: Math.round((fin - inicio) / 60000) };
 }
 
 // Un Gerente no puede asignar una tarea/auditoría a un Admin (ni a un
@@ -312,7 +337,7 @@ module.exports = function registrarRutasCalendario(app) {
   // ------------------------------------------------------------
   // Turnos (tipo TURNO de schedule_events) - gestión de un Gerente (o Admin)
   // para su sucursal. El horario de cada turno sale de sucursales.turno_* -
-  // acá solo se elige DIURNO/NOCTURNO (ver horarioDeTurno).
+  // acá solo se elige día y DIURNO/NOCTURNO (ver obtenerHorariosSucursal).
   // ------------------------------------------------------------
 
   async function obtenerSucursalOError(sucursalId) {
@@ -334,12 +359,11 @@ module.exports = function registrarRutasCalendario(app) {
 
     try {
       await validarResponsablePermitido(req.usuario, responsable_user_id);
-      const sucursal = await obtenerSucursalOError(sucursal_id);
-      const { desde, hasta } = horarioDeTurno(sucursal, turno_tipo);
-      const inicio = new Date(`${fecha}T${desde}:00`);
-      const fin = new Date(`${fecha}T${hasta}:00`);
-      if (fin <= inicio) fin.setDate(fin.getDate() + 1);
-      const duracionMinutos = Math.round((fin - inicio) / 60000);
+      await obtenerSucursalOError(sucursal_id);
+      const horarios = await obtenerHorariosSucursal(sucursal_id);
+      const horario = horarios.get(`${diaSemanaDeFecha(fecha)}|${turno_tipo}`);
+      if (!horario?.habilitado) return res.status(400).json({ error: 'Este turno no está habilitado ese día para esta sucursal (configuralo en la ficha de la sucursal)' });
+      const { inicio, duracionMinutos } = armarOcurrencia(new Date(`${fecha}T00:00:00`), horario);
       const { rows } = await db.query(
         `INSERT INTO schedule_events (sucursal_id, tipo, titulo, responsable_user_id, puesto, turno_tipo, fecha_hora, duracion_minutos, creado_por)
          VALUES ($1,'TURNO',$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
@@ -357,7 +381,7 @@ module.exports = function registrarRutasCalendario(app) {
 
   // "Programar asignaciones": un patrón que se repite en ciertos días de la
   // semana, entre una fecha desde y una fecha hasta (opcional - ver
-  // generarFechasPorDiaSemana y DIAS_VENTANA_SIN_FIN si se omite).
+  // generarOcurrenciasTurnoProgramado y DIAS_VENTANA_SIN_FIN si se omite).
   // Body: { sucursal_id, responsable_user_id, puesto, turno_tipo, dias_semana: [0..6],
   //         fecha_desde, fecha_hasta (opcional), notificar }
   app.post('/api/calendario/turnos/programar', async (req, res) => {
@@ -370,18 +394,20 @@ module.exports = function registrarRutasCalendario(app) {
 
     try {
       await validarResponsablePermitido(req.usuario, responsable_user_id);
-      const sucursal = await obtenerSucursalOError(sucursal_id);
-      const { desde, hasta } = horarioDeTurno(sucursal, turno_tipo);
-      const inicio = new Date(`2000-01-01T${desde}:00`);
-      let fin = new Date(`2000-01-01T${hasta}:00`);
-      if (fin <= inicio) fin.setDate(fin.getDate() + 1);
-      const duracionMinutos = Math.round((fin - inicio) / 60000);
+      await obtenerSucursalOError(sucursal_id);
+      const horarios = await obtenerHorariosSucursal(sucursal_id);
+      const diasPedidos = dias_semana.map(Number);
+      const diasHabilitados = diasPedidos.filter((d) => horarios.get(`${d}|${turno_tipo}`)?.habilitado);
+      const diasOmitidos = diasPedidos.filter((d) => !diasHabilitados.includes(d));
+      if (!diasHabilitados.length) {
+        return res.status(400).json({ error: 'Ninguno de los días elegidos tiene este turno habilitado en esta sucursal (configuralo en la ficha de la sucursal)' });
+      }
 
-      const fechas = generarFechasPorDiaSemana(fecha_desde, fecha_hasta || null, dias_semana, desde);
-      if (!fechas.length) return res.status(400).json({ error: 'El rango de fechas no incluye ninguno de los días elegidos' });
-      const filas = fechas.map((f) => [
+      const ocurrencias = generarOcurrenciasTurnoProgramado(fecha_desde, fecha_hasta || null, diasHabilitados, horarios, turno_tipo);
+      if (!ocurrencias.length) return res.status(400).json({ error: 'El rango de fechas no incluye ninguno de los días elegidos' });
+      const filas = ocurrencias.map(({ inicio, duracionMinutos }) => [
         sucursal_id, 'TURNO', `Turno ${turno_tipo === 'DIURNO' ? 'diurno' : 'nocturno'}`, responsable_user_id, puesto, turno_tipo,
-        f.toISOString(), duracionMinutos, req.usuario.usuarioId,
+        inicio.toISOString(), duracionMinutos, req.usuario.usuarioId,
       ]);
       const insertados = await db.bulkInsert(db.pool, 'schedule_events',
         ['sucursal_id', 'tipo', 'titulo', 'responsable_user_id', 'puesto', 'turno_tipo', 'fecha_hora', 'duracion_minutos', 'creado_por'],
@@ -393,7 +419,11 @@ module.exports = function registrarRutasCalendario(app) {
         await crearNotificacion(responsable_user_id, 'TURNOS_ASIGNADOS', 'Nuevos turnos asignados',
           `Se te asignaron ${insertados.length} turnos.`, { sucursal_id });
       }
-      res.status(201).json({ creados: insertados.length, ventanaSinFin: !fecha_hasta ? DIAS_VENTANA_SIN_FIN : null });
+      res.status(201).json({
+        creados: insertados.length,
+        ventanaSinFin: !fecha_hasta ? DIAS_VENTANA_SIN_FIN : null,
+        diasOmitidos: diasOmitidos.length ? diasOmitidos : undefined,
+      });
     } catch (err) {
       res.status(err.status || 400).json({ error: err.message });
     }
