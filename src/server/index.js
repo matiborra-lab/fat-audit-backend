@@ -299,18 +299,17 @@ app.put('/api/sucursales/:id/horario-turnos', async (req, res) => {
 app.get('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
   try {
     let sql = `SELECT u.id, u.email, u.usuario, u.nombre, u.rol, u.sucursal_id, s.nombre AS sucursal_nombre, u.puesto,
-              u.activo, u.eliminado_en, u.ultimo_login, u.creado_en, (u.password_hash IS NOT NULL) AS clave_definida
+              u.activo, u.eliminado_en, u.ultimo_login, u.ultima_actividad_en, u.creado_en, (u.password_hash IS NOT NULL) AS clave_definida
        FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id WHERE 1=1`;
     const params = [];
     // Un Gerente solo ve/administra los colaboradores de su propia sucursal.
     if (req.usuario.rol === 'GERENTE') {
       params.push(req.usuario.sucursal_id, 'COLABORADOR');
       sql += ` AND u.sucursal_id = $1 AND u.rol = $2`;
-    } else if (req.query.sucursal_id) {
-      // Admin/Auditor: filtro opcional para ver el personal de UNA sucursal
-      // (ej: sección "Personal" en la ficha de Sucursales).
-      params.push(req.query.sucursal_id);
-      sql += ` AND u.sucursal_id = $${params.length}`;
+    } else {
+      // Admin/Auditor: filtros opcionales por sucursal y/o rol.
+      if (req.query.sucursal_id) { params.push(req.query.sucursal_id); sql += ` AND u.sucursal_id = $${params.length}`; }
+      if (req.query.rol) { params.push(req.query.rol); sql += ` AND u.rol = $${params.length}`; }
     }
     sql += ' ORDER BY u.creado_en DESC';
     const { rows } = await db.query(sql, params);

@@ -11,6 +11,23 @@ function canAccessFatAudit(usuario) {
   return !!usuario && usuario.activo === true;
 }
 
+// "Última actividad" = cualquier request autenticado (no solo login) - a
+// diferencia de ultimo_login, esto se actualiza en cada pantalla que el
+// usuario visita. Se throttlea en memoria (como mucho 1 UPDATE por usuario
+// por minuto) para no pegarle a la base en cada pedido; el cache es best
+// effort y se resetea si el server reinicia, sin problema (el próximo
+// request lo vuelve a escribir).
+const ultimaEscrituraPorUsuario = new Map(); // usuarioId -> timestamp (ms)
+const THROTTLE_ACTIVIDAD_MS = 60 * 1000;
+
+function registrarActividad(usuarioId) {
+  const ahora = Date.now();
+  const anterior = ultimaEscrituraPorUsuario.get(usuarioId) || 0;
+  if (ahora - anterior < THROTTLE_ACTIVIDAD_MS) return;
+  ultimaEscrituraPorUsuario.set(usuarioId, ahora);
+  db.query('UPDATE usuarios SET ultima_actividad_en = now() WHERE id = $1', [usuarioId]).catch(() => {});
+}
+
 // Exige un token valido y deja los datos del usuario en
 // req.usuario = { usuarioId, rol, sucursal_id, activo, email, nombre }.
 // rol/sucursal_id/activo se leen FRESCOS de la base en cada request (no del
@@ -38,6 +55,7 @@ async function requireAuth(req, res, next) {
       email: fila.email,
       nombre: fila.nombre,
     };
+    registrarActividad(payload.usuarioId);
     next();
   } catch (err) {
     res.status(401).json({ error: 'Token invalido o vencido' });

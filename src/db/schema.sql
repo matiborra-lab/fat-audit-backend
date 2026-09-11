@@ -43,10 +43,12 @@ CREATE TABLE usuarios (
                                           -- obligatorio (a nivel app) cuando rol = 'GERENTE' o 'COLABORADOR'
   puesto        TEXT CHECK (puesto IN ('COCINA', 'CAJA', 'REFUERZO_COCINA')),
                                           -- obligatorio (a nivel app) solo cuando rol = 'COLABORADOR'
-  activo        BOOLEAN NOT NULL DEFAULT true,
-  eliminado_en  TIMESTAMPTZ,             -- soft-delete, igual criterio que COTEJA: nunca se borra la fila
-  ultimo_login  TIMESTAMPTZ,
-  creado_en     TIMESTAMPTZ NOT NULL DEFAULT now()
+  activo            BOOLEAN NOT NULL DEFAULT true,
+  eliminado_en      TIMESTAMPTZ,             -- soft-delete, igual criterio que COTEJA: nunca se borra la fila
+  ultimo_login      TIMESTAMPTZ,
+  ultima_actividad_en TIMESTAMPTZ,           -- cualquier request autenticado (no solo login) - ver requireAuth,
+                                              -- se actualiza con throttle para no escribir en cada pedido
+  creado_en         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_usuarios_sucursal ON usuarios (sucursal_id);
 
