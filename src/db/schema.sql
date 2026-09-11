@@ -284,3 +284,19 @@ CREATE TABLE notificaciones (
   creado_en     TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_notificaciones_usuario ON notificaciones (usuario_id, creado_en DESC);
+
+-- Suscripciones Web Push (una fila por navegador/dispositivo en el que el
+-- usuario aceptó notificaciones) - crearNotificacion/crearNotificaciones
+-- (ver src/server/notificaciones.js) le pega un push a cada una además de
+-- guardar la notificación in-app. endpoint es único por navegador/dispositivo
+-- (lo da el browser), por eso alcanza como UNIQUE en vez de (usuario_id, endpoint).
+CREATE TABLE push_subscriptions (
+  id          SERIAL PRIMARY KEY,
+  usuario_id  INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  endpoint    TEXT NOT NULL UNIQUE,
+  p256dh      TEXT NOT NULL,
+  auth        TEXT NOT NULL,
+  user_agent  TEXT,
+  creado_en   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_push_subscriptions_usuario ON push_subscriptions (usuario_id);
