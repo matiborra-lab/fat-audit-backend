@@ -13,6 +13,8 @@ const db = require('../db');
 const { puedeAccederSucursal, scopeSucursal } = require('../auth/middleware');
 const { cargarEstructura } = require('./plantillas');
 const { urlDeSubida } = require('../storage');
+const { generarPdfAuditoria } = require('../pdf');
+const { enviarMail } = require('../mailer');
 const { calcularPuntaje } = require('../scoring');
 
 async function obtenerRunOForbidden(req, res) {
@@ -135,6 +137,62 @@ module.exports = function registrarRutasRuns(app) {
         ? await db.query('SELECT * FROM evidencias WHERE respuesta_id = ANY($1) ORDER BY creado_en', [respuestaIds])
         : { rows: [] };
       res.json({ ...run, respuestas, evidencias });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Arma el mismo objeto que GET /api/runs/:id pero con los nombres
+  // (sucursal, auditor) que necesita el PDF y no vienen en audit_runs.
+  async function cargarRunParaPdf(runId) {
+    const { rows } = await db.query(
+      `SELECT r.*, s.nombre AS sucursal_nombre, u.nombre AS auditor_nombre
+       FROM audit_runs r JOIN sucursales s ON s.id = r.sucursal_id JOIN usuarios u ON u.id = r.auditor_user_id
+       WHERE r.id = $1`,
+      [runId]
+    );
+    const run = rows[0];
+    if (!run) return null;
+    const { rows: respuestas } = await db.query('SELECT * FROM audit_respuestas WHERE run_id = $1', [runId]);
+    const respuestaIds = respuestas.map((r) => r.id);
+    const { rows: evidencias } = respuestaIds.length
+      ? await db.query('SELECT * FROM evidencias WHERE respuesta_id = ANY($1)', [respuestaIds])
+      : { rows: [] };
+    return { ...run, respuestas, evidencias };
+  }
+
+  app.get('/api/runs/:id/pdf', async (req, res) => {
+    const run = await obtenerRunOForbidden(req, res);
+    if (!run) return;
+    if (run.estado !== 'COMPLETADA') return res.status(400).json({ error: 'Solo se puede generar el PDF de una auditoría completada' });
+    try {
+      const runCompleto = await cargarRunParaPdf(req.params.id);
+      const buffer = await generarPdfAuditoria(runCompleto);
+      res.set('Content-Type', 'application/pdf');
+      res.set('Content-Disposition', `inline; filename="auditoria-${req.params.id}.pdf"`);
+      res.send(buffer);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/runs/:id/enviar-informe', async (req, res) => {
+    const run = await obtenerRunOForbidden(req, res);
+    if (!run) return;
+    if (run.estado !== 'COMPLETADA') return res.status(400).json({ error: 'Solo se puede enviar el informe de una auditoría completada' });
+    const destinatarios = (req.body.destinatarios || []).map((d) => String(d).trim()).filter(Boolean);
+    if (destinatarios.length === 0) return res.status(400).json({ error: 'Falta al menos un destinatario' });
+    try {
+      const runCompleto = await cargarRunParaPdf(req.params.id);
+      const buffer = await generarPdfAuditoria(runCompleto);
+      await enviarMail({
+        to: destinatarios,
+        subject: `Informe de auditoría — ${runCompleto.sucursal_nombre} — ${new Date(runCompleto.completada_en).toLocaleDateString('es-AR')}`,
+        html: `<p>Adjuntamos el informe de la auditoría realizada en <strong>${runCompleto.sucursal_nombre}</strong>.</p>
+               <p>Puntaje total: <strong>${Math.round((runCompleto.puntaje_total || 0) * 100)}%</strong> · Resultado: <strong>${runCompleto.resultado}</strong></p>`,
+        attachments: [{ filename: `auditoria-${req.params.id}.pdf`, content: buffer }],
+      });
+      res.json({ ok: true, destinatarios });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
