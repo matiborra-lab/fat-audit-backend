@@ -83,6 +83,31 @@ function validarCierre(estructura, respuestas, evidenciasPorRespuesta) {
   return problemas;
 }
 
+// Crea una auditoria (o seguimiento) a partir de una plantilla publicada -
+// factoreado de POST /api/runs para que el calendario (ver calendario.js,
+// "iniciar auditoria" de un evento) pueda arrancar una de la misma forma
+// sin duplicar la validacion de plantilla/rol ni el armado del snapshot.
+// `tipo` es OPCIONAL: audit_runs.tipo solo acepta 'MARCA'|'INTERNA'|'SEGUIMIENTO'
+// (distinto del tipo de evento de calendario, que tiene 'AUDITORIA' en vez
+// de 'MARCA'/'INTERNA' - ver calendario.js). Si no se pasa, se usa el tipo
+// propio de la plantilla.
+async function crearRun({ templateId, sucursalId, tipo, rol, auditorUserId, responsableNombre }) {
+  const { rows: plantillaRows } = await db.query('SELECT * FROM audit_templates WHERE id = $1 AND estado = $2', [templateId, 'PUBLICADA']);
+  const plantilla = plantillaRows[0];
+  if (!plantilla) throw Object.assign(new Error('La plantilla no existe o no está publicada'), { status: 400 });
+  if (!plantilla.roles_permitidos.includes(rol)) throw Object.assign(new Error('Tu rol no puede ejecutar esta plantilla'), { status: 403 });
+
+  const tipoFinal = tipo || plantilla.tipo;
+  const estructura = await cargarEstructura(templateId);
+  estructura.puntaje_minimo_aprobacion = plantilla.puntaje_minimo_aprobacion;
+  const { rows } = await db.query(
+    `INSERT INTO audit_runs (template_id, estructura_snapshot, sucursal_id, tipo, auditor_user_id, responsable_nombre)
+     VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+    [templateId, JSON.stringify(estructura), sucursalId, tipoFinal, auditorUserId, responsableNombre || null]
+  );
+  return rows[0];
+}
+
 module.exports = function registrarRutasRuns(app) {
   // Plantillas PUBLICADAS que el usuario puede ejecutar para una sucursal dada.
   app.get('/api/runs/disponibles', async (req, res) => {
@@ -110,21 +135,10 @@ module.exports = function registrarRutasRuns(app) {
     if (!template_id || !sucursal_id || !tipo) return res.status(400).json({ error: 'Faltan campos: template_id, sucursal_id, tipo' });
     if (!puedeAccederSucursal(req.usuario, sucursal_id)) return res.status(403).json({ error: 'No tenés acceso a esa sucursal' });
     try {
-      const { rows: plantillaRows } = await db.query('SELECT * FROM audit_templates WHERE id = $1 AND estado = $2', [template_id, 'PUBLICADA']);
-      const plantilla = plantillaRows[0];
-      if (!plantilla) return res.status(400).json({ error: 'La plantilla no existe o no está publicada' });
-      if (!plantilla.roles_permitidos.includes(req.usuario.rol)) return res.status(403).json({ error: 'Tu rol no puede ejecutar esta plantilla' });
-
-      const estructura = await cargarEstructura(template_id);
-      estructura.puntaje_minimo_aprobacion = plantilla.puntaje_minimo_aprobacion;
-      const { rows } = await db.query(
-        `INSERT INTO audit_runs (template_id, estructura_snapshot, sucursal_id, tipo, auditor_user_id, responsable_nombre)
-         VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
-        [template_id, JSON.stringify(estructura), sucursal_id, tipo, req.usuario.usuarioId, responsable_nombre || null]
-      );
-      res.status(201).json(rows[0]);
+      const run = await crearRun({ templateId: template_id, sucursalId: sucursal_id, tipo, rol: req.usuario.rol, auditorUserId: req.usuario.usuarioId, responsableNombre: responsable_nombre });
+      res.status(201).json(run);
     } catch (err) {
-      res.status(400).json({ error: err.message });
+      res.status(err.status || 400).json({ error: err.message });
     }
   });
 
@@ -341,3 +355,5 @@ module.exports = function registrarRutasRuns(app) {
     }
   });
 };
+
+module.exports.crearRun = crearRun;

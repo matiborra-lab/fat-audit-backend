@@ -294,9 +294,11 @@ app.post('/api/admin/usuarios/:id/resetear', requireAdmin, async (req, res) => {
 const plantillas = require('./plantillas');
 const runs = require('./runs');
 const historial = require('./historial');
+const calendario = require('./calendario');
 plantillas(app);
 runs(app);
 historial(app);
+calendario(app);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FAT Audit backend escuchando en :${PORT}`));

@@ -213,3 +213,39 @@ CREATE TABLE semaforo_config (
   etiqueta    TEXT NOT NULL,
   orden       INTEGER NOT NULL
 );
+
+-- ============================================================
+-- CALENDARIO
+-- ============================================================
+
+-- Un evento = UNA ocurrencia concreta (fecha/hora puntual), incluida cada
+-- ocurrencia de una serie recurrente - la recurrencia se resuelve al crear
+-- el evento (se generan N filas, una por ocurrencia, con el mismo
+-- serie_id), no como una regla que se expande en cada lectura. Simplifica
+-- mucho la consulta del mes a cambio de no soportar series "infinitas" (se
+-- pide una fecha limite al crear una serie).
+CREATE TABLE schedule_events (
+  id                    SERIAL PRIMARY KEY,
+  sucursal_id           INTEGER NOT NULL REFERENCES sucursales(id) ON DELETE CASCADE,
+  tipo                  TEXT NOT NULL CHECK (tipo IN ('AUDITORIA', 'SEGUIMIENTO', 'TAREA')),
+  template_id           INTEGER REFERENCES audit_templates(id) ON DELETE SET NULL, -- solo AUDITORIA: que plantilla precargar
+  titulo                TEXT NOT NULL,
+  descripcion           TEXT,
+  responsable_user_id   INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  fecha_hora            TIMESTAMPTZ NOT NULL,
+  duracion_minutos      INTEGER,
+  serie_id              INTEGER,             -- agrupa las ocurrencias de una misma recurrencia (id de la 1ra fila de la serie)
+  run_id                INTEGER REFERENCES audit_runs(id) ON DELETE SET NULL, -- solo AUDITORIA/SEGUIMIENTO, una vez iniciada desde el calendario
+  estado                TEXT NOT NULL DEFAULT 'PENDIENTE' CHECK (estado IN ('PENDIENTE', 'COMPLETADA', 'OMITIDA')),
+                                              -- "VENCIDA" NO se guarda - se calcula al leer (pendiente + fecha pasada)
+  completado_en         TIMESTAMPTZ,
+  completado_por        INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  completado_comentario TEXT,
+  evidencia_url         TEXT,                -- solo TAREA: una evidencia por cumplimiento (no varias)
+  evidencia_tipo        TEXT CHECK (evidencia_tipo IN ('FOTO', 'VIDEO')),
+  creado_por            INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado_en             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_schedule_events_sucursal_fecha ON schedule_events (sucursal_id, fecha_hora);
+CREATE INDEX idx_schedule_events_serie ON schedule_events (serie_id);
+CREATE INDEX idx_schedule_events_responsable ON schedule_events (responsable_user_id);
