@@ -23,6 +23,20 @@ const SEMAFORO_COLORES = {
   ROJO: '#DC2626', NARANJA: '#EA580C', AMARILLO: '#CA8A04', VERDE: '#16A34A', DORADO: '#B8860B',
 };
 
+// Misma paleta y mismo hash que colorPorArea en el frontend (ui.jsx) - así
+// una categoría (Bromatología, Limpieza, etc.) se ve siempre con el mismo
+// color en la ejecución, el historial Y el PDF, tal como pide la spec.
+const PALETA_AREA_HEX = ['#2563EB', '#059669', '#9333EA', '#B45309', '#DB2777', '#0891B2', '#4D7C0F', '#4F46E5'];
+function hashTexto(texto) {
+  let h = 0;
+  for (let i = 0; i < texto.length; i++) h = (h * 31 + texto.charCodeAt(i)) >>> 0;
+  return h;
+}
+function colorPorAreaHex(nombre) {
+  if (!nombre) return PALETA_AREA_HEX[0];
+  return PALETA_AREA_HEX[hashTexto(nombre) % PALETA_AREA_HEX.length];
+}
+
 function valorLegible(item, valor) {
   if (valor == null) return '—';
   if (item.tipo_respuesta === 'ESCALA_5') return `${valor} / 5`;
@@ -117,7 +131,17 @@ async function generarPdfAuditoria(run) {
       const valor = resp?.no_aplica ? 'No aplica' : valorLegible(item, resp?.valor_json);
       const critico = item.critico ? '  [crítico]' : '';
 
-      doc.fontSize(9).font('Helvetica').text(item.texto + critico, 40, y, { width: 380 });
+      let xTexto = 40;
+      const areaNombre = estructura.areas.find((a) => a.id === item.area_id)?.nombre;
+      if (areaNombre) {
+        doc.fontSize(7).font('Helvetica-Bold');
+        const anchoChip = doc.widthOfString(areaNombre) + 8;
+        doc.roundedRect(40, y - 1, anchoChip, 11, 3).fill(colorPorAreaHex(areaNombre));
+        doc.fillColor('#FFFFFF').text(areaNombre, 44, y + 0.5, { lineBreak: false });
+        doc.fillColor(COLOR_TEXTO);
+        xTexto = 40 + anchoChip + 6;
+      }
+      doc.fontSize(9).font('Helvetica').text(item.texto + critico, xTexto, y, { width: 420 - (xTexto - 40) });
       doc.font('Helvetica-Bold').text(valor, 430, y, { width: 100, align: 'right' });
       y += 13;
       if (resp?.comentario) {
