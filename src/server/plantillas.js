@@ -80,6 +80,10 @@ function registrarRutasPlantillas(app) {
         params.push(req.query.estado);
         sql += ` AND t.estado = $${params.length}`;
       }
+      if (req.query.tipo) {
+        params.push(req.query.tipo);
+        sql += ` AND t.tipo = $${params.length}`;
+      }
       sql += ' ORDER BY t.nombre, t.version DESC';
       const { rows } = await db.query(sql, params);
       res.json(rows);

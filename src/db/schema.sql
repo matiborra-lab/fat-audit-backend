@@ -4,12 +4,21 @@
 -- ============================================================
 
 CREATE TABLE sucursales (
-  id          SERIAL PRIMARY KEY,
-  nombre      TEXT NOT NULL,
-  codigo      TEXT UNIQUE,
-  direccion   TEXT,
-  activo      BOOLEAN NOT NULL DEFAULT true,
-  creado_en   TIMESTAMPTZ NOT NULL DEFAULT now()
+  id                    SERIAL PRIMARY KEY,
+  nombre                TEXT NOT NULL,
+  codigo                TEXT UNIQUE,
+  direccion             TEXT,
+  activo                BOOLEAN NOT NULL DEFAULT true,
+  -- Horario de cada turno, configurable por sucursal - la grilla de
+  -- "Gestionar turnos" completa fecha_hora/duracion_minutos automaticamente
+  -- a partir de esto cuando se elige DIURNO o NOCTURNO (ver turno_tipo en
+  -- schedule_events); nocturno_hasta < nocturno_desde se interpreta como
+  -- que cruza la medianoche.
+  turno_diurno_desde    TIME NOT NULL DEFAULT '08:00',
+  turno_diurno_hasta    TIME NOT NULL DEFAULT '16:00',
+  turno_nocturno_desde  TIME NOT NULL DEFAULT '16:00',
+  turno_nocturno_hasta  TIME NOT NULL DEFAULT '00:00',
+  creado_en             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
 -- Un GERENTE pertenece a una unica sucursal (sucursal_id fijo) - ADMIN y
@@ -19,11 +28,14 @@ CREATE TABLE sucursales (
 CREATE TABLE usuarios (
   id            SERIAL PRIMARY KEY,
   email         TEXT NOT NULL UNIQUE,
+  usuario       TEXT UNIQUE,            -- nombre de usuario opcional - permite loguearse con email O con usuario
   nombre        TEXT,
   password_hash TEXT,                    -- NULL hasta que acepta la invitacion y pone su clave
-  rol           TEXT NOT NULL DEFAULT 'AUDITOR' CHECK (rol IN ('ADMIN', 'AUDITOR', 'GERENTE')),
+  rol           TEXT NOT NULL DEFAULT 'AUDITOR' CHECK (rol IN ('ADMIN', 'AUDITOR', 'GERENTE', 'COLABORADOR')),
   sucursal_id   INTEGER REFERENCES sucursales(id) ON DELETE SET NULL,
-                                          -- obligatorio (a nivel app) solo cuando rol = 'GERENTE'
+                                          -- obligatorio (a nivel app) cuando rol = 'GERENTE' o 'COLABORADOR'
+  puesto        TEXT CHECK (puesto IN ('COCINA', 'CAJA', 'REFUERZO_COCINA')),
+                                          -- obligatorio (a nivel app) solo cuando rol = 'COLABORADOR'
   activo        BOOLEAN NOT NULL DEFAULT true,
   eliminado_en  TIMESTAMPTZ,             -- soft-delete, igual criterio que COTEJA: nunca se borra la fila
   ultimo_login  TIMESTAMPTZ,
@@ -227,13 +239,17 @@ CREATE TABLE semaforo_config (
 CREATE TABLE schedule_events (
   id                    SERIAL PRIMARY KEY,
   sucursal_id           INTEGER NOT NULL REFERENCES sucursales(id) ON DELETE CASCADE,
-  tipo                  TEXT NOT NULL CHECK (tipo IN ('AUDITORIA', 'SEGUIMIENTO', 'TAREA')),
-  template_id           INTEGER REFERENCES audit_templates(id) ON DELETE SET NULL, -- solo AUDITORIA: que plantilla precargar
+  tipo                  TEXT NOT NULL CHECK (tipo IN ('AUDITORIA', 'SEGUIMIENTO', 'TAREA', 'TURNO')),
+  template_id           INTEGER REFERENCES audit_templates(id) ON DELETE SET NULL, -- solo AUDITORIA/SEGUIMIENTO: que plantilla precargar
   titulo                TEXT NOT NULL,
   descripcion           TEXT,
-  responsable_user_id   INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  responsable_user_id   INTEGER REFERENCES usuarios(id) ON DELETE SET NULL, -- AUDITORIA/SEGUIMIENTO/TAREA: quien la hace: TURNO: el colaborador asignado
+  puesto                TEXT CHECK (puesto IN ('COCINA', 'CAJA', 'REFUERZO_COCINA')), -- solo TURNO - puede diferir
+                                              -- del puesto de base del colaborador (usuarios.puesto): es el puesto
+                                              -- para ESE turno puntual, no cambia su perfil
+  turno_tipo            TEXT CHECK (turno_tipo IN ('DIURNO', 'NOCTURNO')), -- solo TURNO
   fecha_hora            TIMESTAMPTZ NOT NULL,
-  duracion_minutos      INTEGER,
+  duracion_minutos      INTEGER,             -- TURNO: junto a fecha_hora define el "hasta" (fecha_hora + duracion)
   serie_id              INTEGER,             -- agrupa las ocurrencias de una misma recurrencia (id de la 1ra fila de la serie)
   run_id                INTEGER REFERENCES audit_runs(id) ON DELETE SET NULL, -- solo AUDITORIA/SEGUIMIENTO, una vez iniciada desde el calendario
   estado                TEXT NOT NULL DEFAULT 'PENDIENTE' CHECK (estado IN ('PENDIENTE', 'COMPLETADA', 'OMITIDA')),
@@ -243,9 +259,28 @@ CREATE TABLE schedule_events (
   completado_comentario TEXT,
   evidencia_url         TEXT,                -- solo TAREA: una evidencia por cumplimiento (no varias)
   evidencia_tipo        TEXT CHECK (evidencia_tipo IN ('FOTO', 'VIDEO')),
+  solicitud_revision_motivo  TEXT,            -- solo TURNO: "no puedo asistir" del colaborador asignado
+  solicitud_revision_en      TIMESTAMPTZ,
+  solicitud_revision_estado  TEXT CHECK (solicitud_revision_estado IN ('PENDIENTE', 'RESUELTA')),
   creado_por            INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
   creado_en             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_schedule_events_sucursal_fecha ON schedule_events (sucursal_id, fecha_hora);
 CREATE INDEX idx_schedule_events_serie ON schedule_events (serie_id);
 CREATE INDEX idx_schedule_events_responsable ON schedule_events (responsable_user_id);
+
+-- Notificaciones in-app - base de datos compartida con Web Push (etapa
+-- posterior): cada trigger (turnos publicados, solicitud de revision,
+-- asignacion) inserta aca: mas adelante, el mismo insert tambien dispara el
+-- push. Por ahora solo se muestran in-app (campana en el Layout).
+CREATE TABLE notificaciones (
+  id            SERIAL PRIMARY KEY,
+  usuario_id    INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  tipo          TEXT NOT NULL,
+  titulo        TEXT NOT NULL,
+  cuerpo        TEXT,
+  payload_json  JSONB,
+  leida_en      TIMESTAMPTZ,
+  creado_en     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_notificaciones_usuario ON notificaciones (usuario_id, creado_en DESC);

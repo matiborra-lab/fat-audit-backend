@@ -47,7 +47,19 @@ app.get('/health/db', async (req, res) => {
 });
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const ROLES_VALIDOS = ['ADMIN', 'AUDITOR', 'GERENTE'];
+const USUARIO_REGEX = /^[a-zA-Z0-9._-]{3,30}$/;
+const ROLES_VALIDOS = ['ADMIN', 'AUDITOR', 'GERENTE', 'COLABORADOR'];
+const PUESTOS_VALIDOS = ['COCINA', 'CAJA', 'REFUERZO_COCINA'];
+
+// Un Gerente puede administrar SOLO colaboradores de su propia sucursal -
+// nunca otros gerentes, auditores o admins (eso sigue siendo exclusivo de
+// Admin). Se usa en las rutas de usuarios en vez de requireAdmin.
+function requireAdminOGerente(req, res, next) {
+  if (req.usuario.rol !== 'ADMIN' && req.usuario.rol !== 'GERENTE') {
+    return res.status(403).json({ error: 'Esta acción es solo para administradores o gerentes' });
+  }
+  next();
+}
 
 function linkDefinirPassword(token) {
   const base = process.env.FRONTEND_URL || 'http://localhost:5173';
@@ -59,16 +71,21 @@ function linkDefinirPassword(token) {
 // ------------------------------------------------------------
 
 app.post('/api/auth/login', async (req, res) => {
-  const { email, password } = req.body;
-  if (!email || !password) return res.status(400).json({ error: 'Faltan campos: email, password' });
+  // Se puede ingresar con email o con nombre de usuario (usuarios.usuario) -
+  // el campo llega como `identificador`, pero se acepta `email` tambien por
+  // compatibilidad con el body viejo.
+  const identificador = req.body.identificador ?? req.body.email;
+  const { password } = req.body;
+  if (!identificador || !password) return res.status(400).json({ error: 'Faltan campos: identificador, password' });
   try {
+    const valor = String(identificador).toLowerCase().trim();
     const { rows } = await db.query(
-      'SELECT id, email, nombre, password_hash, rol, sucursal_id, activo FROM usuarios WHERE email = $1',
-      [String(email).toLowerCase().trim()]
+      'SELECT id, email, nombre, password_hash, rol, sucursal_id, activo FROM usuarios WHERE email = $1 OR LOWER(usuario) = $1',
+      [valor]
     );
     const usuario = rows[0];
     if (!canAccessFatAudit(usuario) || !(await verificarPassword(password, usuario.password_hash))) {
-      return res.status(401).json({ error: 'Email o contraseña incorrectos' });
+      return res.status(401).json({ error: 'Usuario/email o contraseña incorrectos' });
     }
     await db.query('UPDATE usuarios SET ultimo_login = now() WHERE id = $1', [usuario.id]);
     const token = emitirToken(usuario);
@@ -192,13 +209,24 @@ app.post('/api/sucursales', requireAdmin, async (req, res) => {
   }
 });
 
-app.patch('/api/sucursales/:id', requireAdmin, async (req, res) => {
-  const { nombre, codigo, direccion, activo } = req.body;
+app.patch('/api/sucursales/:id', async (req, res) => {
+  // Un Gerente puede configurar SOLO el horario de turnos de su propia
+  // sucursal (nombre/código/dirección/activo siguen siendo solo de Admin).
+  const esGerentePropia = req.usuario.rol === 'GERENTE' && req.usuario.sucursal_id === Number(req.params.id);
+  if (req.usuario.rol !== 'ADMIN' && !esGerentePropia) {
+    return res.status(403).json({ error: 'No tenés permiso para editar esta sucursal' });
+  }
+  const { turno_diurno_desde, turno_diurno_hasta, turno_nocturno_desde, turno_nocturno_hasta } = req.body;
+  const { nombre, codigo, direccion, activo } = esGerentePropia ? {} : req.body;
   try {
     const { rows } = await db.query(
       `UPDATE sucursales SET nombre = COALESCE($1,nombre), codigo = COALESCE($2,codigo),
-       direccion = COALESCE($3,direccion), activo = COALESCE($4,activo) WHERE id = $5 RETURNING *`,
-      [nombre ?? null, codigo ?? null, direccion ?? null, activo ?? null, req.params.id]
+       direccion = COALESCE($3,direccion), activo = COALESCE($4,activo),
+       turno_diurno_desde = COALESCE($6,turno_diurno_desde), turno_diurno_hasta = COALESCE($7,turno_diurno_hasta),
+       turno_nocturno_desde = COALESCE($8,turno_nocturno_desde), turno_nocturno_hasta = COALESCE($9,turno_nocturno_hasta)
+       WHERE id = $5 RETURNING *`,
+      [nombre ?? null, codigo ?? null, direccion ?? null, activo ?? null, req.params.id,
+        turno_diurno_desde ?? null, turno_diurno_hasta ?? null, turno_nocturno_desde ?? null, turno_nocturno_hasta ?? null]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Sucursal no encontrada' });
     res.json(rows[0]);
@@ -211,31 +239,46 @@ app.patch('/api/sucursales/:id', requireAdmin, async (req, res) => {
 // Usuarios (admin)
 // ------------------------------------------------------------
 
-app.get('/api/admin/usuarios', requireAdmin, async (req, res) => {
+app.get('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
   try {
-    const { rows } = await db.query(
-      `SELECT u.id, u.email, u.nombre, u.rol, u.sucursal_id, s.nombre AS sucursal_nombre,
+    let sql = `SELECT u.id, u.email, u.usuario, u.nombre, u.rol, u.sucursal_id, s.nombre AS sucursal_nombre, u.puesto,
               u.activo, u.eliminado_en, u.ultimo_login, u.creado_en, (u.password_hash IS NOT NULL) AS clave_definida
-       FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id
-       ORDER BY u.creado_en DESC`
-    );
+       FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id WHERE 1=1`;
+    const params = [];
+    // Un Gerente solo ve/administra los colaboradores de su propia sucursal.
+    if (req.usuario.rol === 'GERENTE') {
+      params.push(req.usuario.sucursal_id, 'COLABORADOR');
+      sql += ` AND u.sucursal_id = $1 AND u.rol = $2`;
+    }
+    sql += ' ORDER BY u.creado_en DESC';
+    const { rows } = await db.query(sql, params);
     res.json(rows);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
-app.post('/api/admin/usuarios', requireAdmin, async (req, res) => {
-  const { email, nombre, rol, sucursal_id } = req.body;
+app.post('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
+  let { email, usuario: nombreUsuario, nombre, rol, sucursal_id, puesto } = req.body;
   if (!email || !EMAIL_REGEX.test(email)) return res.status(400).json({ error: 'El email no es valido' });
+  if (nombreUsuario && !USUARIO_REGEX.test(nombreUsuario)) return res.status(400).json({ error: 'El nombre de usuario tiene que tener 3-30 caracteres (letras, numeros, puntos, guiones)' });
+
+  // Un Gerente solo puede invitar colaboradores, y siempre a su propia
+  // sucursal (se ignora cualquier sucursal_id que mande - no se puede pedir
+  // "confiar" en el body para esto).
+  if (req.usuario.rol === 'GERENTE') {
+    rol = 'COLABORADOR';
+    sucursal_id = req.usuario.sucursal_id;
+  }
   if (!ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol invalido, tiene que ser uno de: ' + ROLES_VALIDOS.join(', ') });
-  if (rol === 'GERENTE' && !sucursal_id) return res.status(400).json({ error: 'Un gerente necesita una sucursal asignada' });
+  if ((rol === 'GERENTE' || rol === 'COLABORADOR') && !sucursal_id) return res.status(400).json({ error: 'Este rol necesita una sucursal asignada' });
+  if (rol === 'COLABORADOR' && !PUESTOS_VALIDOS.includes(puesto)) return res.status(400).json({ error: 'Un colaborador necesita un puesto válido: ' + PUESTOS_VALIDOS.join(', ') });
 
   try {
     const { rows } = await db.query(
-      `INSERT INTO usuarios (email, nombre, rol, sucursal_id) VALUES ($1,$2,$3,$4)
-       RETURNING id, email, nombre, rol, sucursal_id, activo, creado_en`,
-      [String(email).toLowerCase().trim(), nombre || null, rol, rol === 'GERENTE' ? sucursal_id : null]
+      `INSERT INTO usuarios (email, usuario, nombre, rol, sucursal_id, puesto) VALUES ($1,$2,$3,$4,$5,$6)
+       RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, activo, creado_en`,
+      [String(email).toLowerCase().trim(), nombreUsuario ? nombreUsuario.trim() : null, nombre || null, rol, (rol === 'GERENTE' || rol === 'COLABORADOR') ? sucursal_id : null, rol === 'COLABORADOR' ? puesto : null]
     );
     const usuario = rows[0];
     try {
@@ -250,34 +293,76 @@ app.post('/api/admin/usuarios', requireAdmin, async (req, res) => {
       res.status(201).json({ ...usuario, advertencia: 'El usuario se creo pero no se pudo mandar el mail de invitacion: ' + mailErr.message });
     }
   } catch (err) {
-    if (err.code === '23505') return res.status(400).json({ error: 'Ya existe un usuario con ese email' });
+    if (err.code === '23505') {
+      const campo = err.constraint?.includes('usuario') ? 'nombre de usuario' : 'email';
+      return res.status(400).json({ error: `Ya existe un usuario con ese ${campo}` });
+    }
     res.status(400).json({ error: err.message });
   }
 });
 
-app.patch('/api/admin/usuarios/:id', requireAdmin, async (req, res) => {
-  const { rol, sucursal_id, activo, nombre } = req.body;
-  if (rol !== undefined && !ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol invalido' });
-  if (rol === 'GERENTE' && sucursal_id === undefined) return res.status(400).json({ error: 'Un gerente necesita una sucursal asignada' });
+app.patch('/api/admin/usuarios/:id', requireAdminOGerente, async (req, res) => {
   try {
+    const { rows: actualRows } = await db.query('SELECT rol, sucursal_id FROM usuarios WHERE id = $1', [req.params.id]);
+    if (!actualRows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
+
+    if (req.usuario.rol === 'GERENTE') {
+      // Un Gerente solo puede tocar activo/puesto/nombre de SUS colaboradores
+      // - nunca el rol ni la sucursal (evita que se "traspase" a otro local
+      // o se autoascienda pisando el rol).
+      if (actualRows[0].rol !== 'COLABORADOR' || actualRows[0].sucursal_id !== req.usuario.sucursal_id) {
+        return res.status(403).json({ error: 'No podés editar este usuario' });
+      }
+      if (req.body.rol !== undefined || req.body.sucursal_id !== undefined) {
+        return res.status(403).json({ error: 'Un gerente no puede cambiar el rol ni la sucursal de un colaborador' });
+      }
+      if (req.body.puesto !== undefined && !PUESTOS_VALIDOS.includes(req.body.puesto)) {
+        return res.status(400).json({ error: 'Puesto inválido: ' + PUESTOS_VALIDOS.join(', ') });
+      }
+      if (req.body.usuario && !USUARIO_REGEX.test(req.body.usuario)) {
+        return res.status(400).json({ error: 'El nombre de usuario tiene que tener 3-30 caracteres (letras, numeros, puntos, guiones)' });
+      }
+      const { rows } = await db.query(
+        `UPDATE usuarios SET nombre = COALESCE($1,nombre), puesto = COALESCE($2,puesto), activo = COALESCE($3,activo),
+         usuario = COALESCE($5,usuario)
+         WHERE id = $4 RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, activo`,
+        [req.body.nombre ?? null, req.body.puesto ?? null, req.body.activo ?? null, req.params.id, req.body.usuario ? req.body.usuario.trim() : null]
+      );
+      return res.json(rows[0]);
+    }
+
+    const { rol, sucursal_id, activo, nombre, puesto, usuario: nombreUsuario } = req.body;
+    if (rol !== undefined && !ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol invalido' });
+    if (rol === 'GERENTE' && sucursal_id === undefined) return res.status(400).json({ error: 'Un gerente necesita una sucursal asignada' });
+    if (rol === 'COLABORADOR' && sucursal_id === undefined) return res.status(400).json({ error: 'Un colaborador necesita una sucursal asignada' });
+    if (rol === 'COLABORADOR' && puesto !== undefined && !PUESTOS_VALIDOS.includes(puesto)) return res.status(400).json({ error: 'Puesto inválido: ' + PUESTOS_VALIDOS.join(', ') });
+    if (nombreUsuario && !USUARIO_REGEX.test(nombreUsuario)) return res.status(400).json({ error: 'El nombre de usuario tiene que tener 3-30 caracteres (letras, numeros, puntos, guiones)' });
     const { rows } = await db.query(
       `UPDATE usuarios SET rol = COALESCE($1,rol), nombre = COALESCE($2,nombre),
-       sucursal_id = CASE WHEN $1 = 'GERENTE' THEN $3 WHEN $1 IS NOT NULL THEN NULL ELSE sucursal_id END,
-       activo = COALESCE($4,activo)
-       WHERE id = $5 RETURNING id, email, nombre, rol, sucursal_id, activo`,
-      [rol ?? null, nombre ?? null, sucursal_id ?? null, activo ?? null, req.params.id]
+       sucursal_id = CASE WHEN $1 IN ('GERENTE','COLABORADOR') THEN $3 WHEN $1 IS NOT NULL THEN NULL ELSE sucursal_id END,
+       puesto = CASE WHEN $1 = 'COLABORADOR' THEN COALESCE($6,puesto) WHEN $1 IS NOT NULL THEN NULL ELSE puesto END,
+       activo = COALESCE($4,activo), usuario = COALESCE($7,usuario)
+       WHERE id = $5 RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, activo`,
+      [rol ?? null, nombre ?? null, sucursal_id ?? null, activo ?? null, req.params.id, puesto ?? null, nombreUsuario ? nombreUsuario.trim() : null]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
     res.json(rows[0]);
   } catch (err) {
+    if (err.code === '23505') {
+      const campo = err.constraint?.includes('usuario') ? 'nombre de usuario' : 'email';
+      return res.status(400).json({ error: `Ya existe un usuario con ese ${campo}` });
+    }
     res.status(400).json({ error: err.message });
   }
 });
 
-app.post('/api/admin/usuarios/:id/resetear', requireAdmin, async (req, res) => {
+app.post('/api/admin/usuarios/:id/resetear', requireAdminOGerente, async (req, res) => {
   try {
-    const { rows } = await db.query('SELECT id, email, activo FROM usuarios WHERE id = $1', [req.params.id]);
+    const { rows } = await db.query('SELECT id, email, activo, rol, sucursal_id FROM usuarios WHERE id = $1', [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
+    if (req.usuario.rol === 'GERENTE' && (rows[0].rol !== 'COLABORADOR' || rows[0].sucursal_id !== req.usuario.sucursal_id)) {
+      return res.status(403).json({ error: 'No podés resetear la clave de este usuario' });
+    }
     if (!rows[0].activo) return res.status(400).json({ error: 'Este usuario esta deshabilitado - reactivalo antes de reenviar la invitacion' });
     const token = await crearToken(rows[0].id, 'RESET');
     await enviarMail({
@@ -291,14 +376,53 @@ app.post('/api/admin/usuarios/:id/resetear', requireAdmin, async (req, res) => {
   }
 });
 
+// ------------------------------------------------------------
+// Buscador de responsables (para el picker de auditorías, turnos y
+// eventos de calendario) - devuelve gente que pertenece a esa sucursal
+// (Gerente + Colaboradores) mas Admin/Auditor, que pueden ser responsables
+// de cualquier sucursal.
+// ------------------------------------------------------------
+app.get('/api/usuarios/buscar', async (req, res) => {
+  let sucursalId = req.query.sucursal_id ? Number(req.query.sucursal_id) : null;
+  const q = (req.query.q || '').trim();
+
+  if (req.usuario.rol === 'GERENTE' || req.usuario.rol === 'COLABORADOR') {
+    sucursalId = req.usuario.sucursal_id;
+  }
+  if (!sucursalId) return res.status(400).json({ error: 'Falta el parámetro: sucursal_id' });
+
+  try {
+    const params = [sucursalId];
+    // Un Gerente no puede elegir Admin ni Auditor como responsable (solo a
+    // otro Gerente de su sucursal o a un Colaborador) - Admin/Auditor
+    // siguen viendo a todos, incluidos ellos mismos.
+    let sql = req.usuario.rol === 'GERENTE'
+      ? `SELECT id, nombre, email, rol, puesto FROM usuarios
+         WHERE activo = true AND sucursal_id = $1 AND rol IN ('GERENTE','COLABORADOR')`
+      : `SELECT id, nombre, email, rol, puesto FROM usuarios
+         WHERE activo = true AND (sucursal_id = $1 OR rol IN ('ADMIN','AUDITOR'))`;
+    if (q) {
+      params.push(`%${q}%`);
+      sql += ` AND (nombre ILIKE $${params.length} OR email ILIKE $${params.length})`;
+    }
+    sql += ' ORDER BY (rol = \'COLABORADOR\') DESC, (rol = \'GERENTE\') DESC, nombre LIMIT 20';
+    const { rows } = await db.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 const plantillas = require('./plantillas');
 const runs = require('./runs');
 const historial = require('./historial');
 const calendario = require('./calendario');
+const notificaciones = require('./notificaciones');
 plantillas(app);
 runs(app);
 historial(app);
 calendario(app);
+notificaciones(app);
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FAT Audit backend escuchando en :${PORT}`));
