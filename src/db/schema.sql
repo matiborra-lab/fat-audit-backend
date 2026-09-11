@@ -300,3 +300,32 @@ CREATE TABLE push_subscriptions (
   creado_en   TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_push_subscriptions_usuario ON push_subscriptions (usuario_id);
+
+-- ============================================================
+-- REPORTES PROGRAMADOS
+-- ============================================================
+
+-- Envío periódico (semanal o mensual) de un resumen de auditorías por mail -
+-- lo evalúa un chequeo en memoria cada N minutos (ver src/reportes), no un
+-- cron de sistema operativo, para no depender de infraestructura extra.
+-- dia_mes se limita a 1-28 para que dispare todos los meses por igual (evita
+-- el caso "día 31" en meses más cortos).
+CREATE TABLE reportes_programados (
+  id              SERIAL PRIMARY KEY,
+  nombre          TEXT NOT NULL,
+  sucursal_id     INTEGER REFERENCES sucursales(id) ON DELETE CASCADE,  -- NULL = todas las sucursales (solo Admin/Auditor)
+  frecuencia      TEXT NOT NULL CHECK (frecuencia IN ('SEMANAL', 'MENSUAL')),
+  dia_semana      INTEGER CHECK (dia_semana BETWEEN 0 AND 6),  -- solo SEMANAL (0=domingo..6=sábado, Date#getDay)
+  dia_mes         INTEGER CHECK (dia_mes BETWEEN 1 AND 28),    -- solo MENSUAL
+  hora            TIME NOT NULL DEFAULT '08:00',
+  destinatarios   TEXT[] NOT NULL,
+  activo          BOOLEAN NOT NULL DEFAULT true,
+  ultimo_envio_en TIMESTAMPTZ,  -- evita reenviar dos veces el mismo período
+  creado_por      INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado_en       TIMESTAMPTZ NOT NULL DEFAULT now(),
+  CHECK (
+    (frecuencia = 'SEMANAL' AND dia_semana IS NOT NULL AND dia_mes IS NULL) OR
+    (frecuencia = 'MENSUAL' AND dia_mes IS NOT NULL AND dia_semana IS NULL)
+  )
+);
+CREATE INDEX idx_reportes_programados_activo ON reportes_programados (activo);

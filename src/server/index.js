@@ -418,11 +418,16 @@ const runs = require('./runs');
 const historial = require('./historial');
 const calendario = require('./calendario');
 const notificaciones = require('./notificaciones');
+const reportes = require('./reportes');
 plantillas(app);
 runs(app);
 historial(app);
 calendario(app);
 notificaciones(app);
+reportes(app);
+
+const { iniciarScheduler } = require('../reportes');
+iniciarScheduler();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FAT Audit backend escuchando en :${PORT}`));
