@@ -1,0 +1,204 @@
+-- ============================================================
+-- ESQUEMA DE BASE DE DATOS - FAT AUDIT
+-- Postgres. Auditorías multi-sucursal de FAT Burger.
+-- ============================================================
+
+CREATE TABLE sucursales (
+  id          SERIAL PRIMARY KEY,
+  nombre      TEXT NOT NULL,
+  codigo      TEXT UNIQUE,
+  direccion   TEXT,
+  activo      BOOLEAN NOT NULL DEFAULT true,
+  creado_en   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Un GERENTE pertenece a una unica sucursal (sucursal_id fijo) - ADMIN y
+-- AUDITOR tienen alcance global y sucursal_id queda NULL. A diferencia de un
+-- modelo usuario<->sucursal N a N, esto alcanza porque la spec pide
+-- explicitamente "el gerente pertenece a una unica sucursal".
+CREATE TABLE usuarios (
+  id            SERIAL PRIMARY KEY,
+  email         TEXT NOT NULL UNIQUE,
+  nombre        TEXT,
+  password_hash TEXT,                    -- NULL hasta que acepta la invitacion y pone su clave
+  rol           TEXT NOT NULL DEFAULT 'AUDITOR' CHECK (rol IN ('ADMIN', 'AUDITOR', 'GERENTE')),
+  sucursal_id   INTEGER REFERENCES sucursales(id) ON DELETE SET NULL,
+                                          -- obligatorio (a nivel app) solo cuando rol = 'GERENTE'
+  activo        BOOLEAN NOT NULL DEFAULT true,
+  eliminado_en  TIMESTAMPTZ,             -- soft-delete, igual criterio que COTEJA: nunca se borra la fila
+  ultimo_login  TIMESTAMPTZ,
+  creado_en     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_usuarios_sucursal ON usuarios (sucursal_id);
+
+-- Tokens de un solo uso para "aceptar invitacion" y "olvide mi contraseña".
+CREATE TABLE tokens_usuario (
+  id          SERIAL PRIMARY KEY,
+  usuario_id  INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  token       TEXT NOT NULL UNIQUE,
+  tipo        TEXT NOT NULL CHECK (tipo IN ('INVITACION', 'RESET')),
+  expira_en   TIMESTAMPTZ NOT NULL,
+  usado_en    TIMESTAMPTZ,
+  creado_en   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- ============================================================
+-- PLANTILLAS DE AUDITORIA
+-- ============================================================
+
+-- Publicar una plantilla que ya estaba PUBLICADA crea una fila nueva con
+-- version+1 y plantilla_base_id apuntando a la primera version de la
+-- familia (para poder listar "todas las versiones de esta plantilla"). Las
+-- auditorias ya hechas nunca dependen de esta tabla en tiempo de lectura -
+-- guardan su propia foto (audit_runs.estructura_snapshot).
+CREATE TABLE audit_templates (
+  id                      SERIAL PRIMARY KEY,
+  plantilla_base_id       INTEGER REFERENCES audit_templates(id) ON DELETE SET NULL,
+  nombre                  TEXT NOT NULL,
+  descripcion             TEXT,
+  tipo                    TEXT NOT NULL DEFAULT 'INTERNA' CHECK (tipo IN ('MARCA', 'INTERNA', 'SEGUIMIENTO')),
+  version                 INTEGER NOT NULL DEFAULT 1,
+  estado                  TEXT NOT NULL DEFAULT 'BORRADOR' CHECK (estado IN ('BORRADOR', 'PUBLICADA', 'ARCHIVADA')),
+  weighting_mode          TEXT NOT NULL DEFAULT 'CON_PESO' CHECK (weighting_mode IN ('SIN_PESO', 'CON_PESO')),
+  aplica_todas_sucursales BOOLEAN NOT NULL DEFAULT true,
+  roles_permitidos        TEXT[] NOT NULL DEFAULT ARRAY['ADMIN', 'AUDITOR']::TEXT[],
+                                          -- quien puede EJECUTAR esta plantilla ('GERENTE' se suma explicitamente
+                                          -- si la plantilla lo habilita para auditorias internas del propio local)
+  creado_por              INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado_en               TIMESTAMPTZ NOT NULL DEFAULT now(),
+  actualizado_en          TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Solo se usa cuando aplica_todas_sucursales = false.
+CREATE TABLE template_sucursales (
+  id           SERIAL PRIMARY KEY,
+  template_id  INTEGER NOT NULL REFERENCES audit_templates(id) ON DELETE CASCADE,
+  sucursal_id  INTEGER NOT NULL REFERENCES sucursales(id) ON DELETE CASCADE,
+  UNIQUE (template_id, sucursal_id)
+);
+
+-- Agrupador de recorrido fisico (Cocina, Deposito, etc.) - es el "sector"
+-- del Excel original y tambien la seccion que el auditor completa paso a
+-- paso en el celular (ver ejecucion movil).
+CREATE TABLE audit_sectores (
+  id           SERIAL PRIMARY KEY,
+  template_id  INTEGER NOT NULL REFERENCES audit_templates(id) ON DELETE CASCADE,
+  nombre       TEXT NOT NULL,
+  orden        INTEGER NOT NULL DEFAULT 0,
+  peso         NUMERIC(6,4)              -- NULL = sin peso explicito (reparto igual entre sectores sin peso)
+);
+
+-- Dimension transversal (Bromatologia, Marca, etc.) - se audita dentro de
+-- varios sectores a la vez; cada item pertenece a un sector Y a un area.
+CREATE TABLE audit_areas (
+  id           SERIAL PRIMARY KEY,
+  template_id  INTEGER NOT NULL REFERENCES audit_templates(id) ON DELETE CASCADE,
+  nombre       TEXT NOT NULL,
+  orden        INTEGER NOT NULL DEFAULT 0,
+  peso         NUMERIC(6,4)
+);
+
+CREATE TABLE audit_items (
+  id                   SERIAL PRIMARY KEY,
+  sector_id            INTEGER NOT NULL REFERENCES audit_sectores(id) ON DELETE CASCADE,
+  area_id              INTEGER NOT NULL REFERENCES audit_areas(id) ON DELETE CASCADE,
+  texto                TEXT NOT NULL,
+  ayuda_texto          TEXT,                    -- aclaracion/instructivo para el auditor (columna "Comentarios" del Excel)
+  tipo_respuesta       TEXT NOT NULL DEFAULT 'ESCALA_5'
+    CHECK (tipo_respuesta IN ('SI_NO', 'CHECKBOX', 'ESCALA_5', 'ESCALA_10', 'OPCION_MULTIPLE', 'NUMERO', 'TEXTO', 'FECHA')),
+  opciones_json        JSONB,                   -- solo OPCION_MULTIPLE: [{etiqueta, valor}], valor en 0..1
+  peso                 NUMERIC(6,4),             -- NULL = reparto igual entre los items sin peso de su area+sector
+  critico              BOOLEAN NOT NULL DEFAULT false,   -- marcador informativo (comprobante + resumen de criticos)
+  informe_in_situ      BOOLEAN NOT NULL DEFAULT false,   -- debe figurar en el comprobante de visita
+  evidencia_requerida  TEXT NOT NULL DEFAULT 'NINGUNA' CHECK (evidencia_requerida IN ('NINGUNA', 'FOTO', 'VIDEO', 'FOTO_O_VIDEO')),
+  permite_no_aplica    BOOLEAN NOT NULL DEFAULT false,
+  orden                INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_audit_items_sector ON audit_items (sector_id);
+CREATE INDEX idx_audit_items_area ON audit_items (area_id);
+
+-- Regla condicional: IF respuesta [operador] valor THEN exigir acciones.
+CREATE TABLE item_reglas (
+  id             SERIAL PRIMARY KEY,
+  item_id        INTEGER NOT NULL REFERENCES audit_items(id) ON DELETE CASCADE,
+  condicion_json JSONB NOT NULL,   -- {operador: '=','<','<=','>','>=','entre','contiene', valor}
+  acciones_json  JSONB NOT NULL    -- {comentario_obligatorio, foto_obligatoria, video_obligatoria, accion_sugerida}
+);
+
+-- Umbral minimo por sector o por area (a traves de TODA la auditoria, no solo
+-- un sector) que, si no se alcanza, desaprueba la auditoria sin importar el
+-- puntaje total - configurable por plantilla (ver src/scoring).
+CREATE TABLE umbrales_criticos (
+  id                 SERIAL PRIMARY KEY,
+  template_id        INTEGER NOT NULL REFERENCES audit_templates(id) ON DELETE CASCADE,
+  tipo               TEXT NOT NULL CHECK (tipo IN ('SECTOR', 'AREA')),
+  sector_id          INTEGER REFERENCES audit_sectores(id) ON DELETE CASCADE,
+  area_id            INTEGER REFERENCES audit_areas(id) ON DELETE CASCADE,
+  porcentaje_minimo  NUMERIC(5,4) NOT NULL,  -- 0..1
+  CHECK (
+    (tipo = 'SECTOR' AND sector_id IS NOT NULL AND area_id IS NULL) OR
+    (tipo = 'AREA' AND area_id IS NOT NULL AND sector_id IS NULL)
+  )
+);
+
+-- ============================================================
+-- EJECUCION DE AUDITORIAS
+-- ============================================================
+
+CREATE TABLE audit_runs (
+  id                    SERIAL PRIMARY KEY,
+  template_id           INTEGER NOT NULL REFERENCES audit_templates(id) ON DELETE RESTRICT,
+  estructura_snapshot   JSONB NOT NULL,   -- copia completa de sectores/areas/items/reglas/umbrales al iniciar -
+                                           -- una auditoria ya hecha nunca cambia aunque se edite la plantilla despues
+  sucursal_id           INTEGER NOT NULL REFERENCES sucursales(id) ON DELETE RESTRICT,
+  tipo                  TEXT NOT NULL CHECK (tipo IN ('MARCA', 'INTERNA', 'SEGUIMIENTO')),
+  auditor_user_id       INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
+  responsable_nombre    TEXT,             -- responsable/gerente/turno auditado (texto libre)
+  estado                TEXT NOT NULL DEFAULT 'EN_PROGRESO' CHECK (estado IN ('EN_PROGRESO', 'COMPLETADA', 'CANCELADA')),
+  iniciada_en           TIMESTAMPTZ NOT NULL DEFAULT now(),
+  completada_en         TIMESTAMPTZ,
+  puntaje_total         NUMERIC(6,4),     -- 0..1, se completa al finalizar
+  semaforo              TEXT,             -- 'ROJO'|'NARANJA'|'AMARILLO'|'VERDE'|'DORADO'
+  resultado             TEXT CHECK (resultado IN ('APROBADA', 'DESAPROBADA')),
+  detalle_calculo       JSONB,            -- rollup por sector/area ya resuelto (ver src/scoring) - evita recalcular
+                                           -- en cada lectura del historial/dashboard
+  firma_nombre          TEXT,             -- confirmacion del auditor al cerrar (nombre tipeado)
+  firma_responsable      TEXT,            -- confirmacion opcional del responsable del turno
+  origen_run_id         INTEGER REFERENCES audit_runs(id) ON DELETE SET NULL,  -- seguimientos: de que auditoria salio
+  creado_en             TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_audit_runs_sucursal ON audit_runs (sucursal_id, creado_en);
+CREATE INDEX idx_audit_runs_estado ON audit_runs (estado);
+CREATE INDEX idx_audit_runs_origen ON audit_runs (origen_run_id);
+
+CREATE TABLE audit_respuestas (
+  id             SERIAL PRIMARY KEY,
+  run_id         INTEGER NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+  item_id        INTEGER NOT NULL,   -- id del item DENTRO del snapshot (no FK - el item vivo pudo cambiar/borrarse)
+  valor_json     JSONB,              -- respuesta cruda: numero, boolean, string u opcion elegida
+  comentario     TEXT,
+  no_aplica      BOOLEAN NOT NULL DEFAULT false,
+  actualizado_en TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (run_id, item_id)
+);
+
+CREATE TABLE evidencias (
+  id             SERIAL PRIMARY KEY,
+  respuesta_id   INTEGER NOT NULL REFERENCES audit_respuestas(id) ON DELETE CASCADE,
+  tipo           TEXT NOT NULL CHECK (tipo IN ('FOTO', 'VIDEO')),
+  url            TEXT NOT NULL,
+  thumbnail_url  TEXT,
+  creado_en      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_evidencias_respuesta ON evidencias (respuesta_id);
+
+-- Semaforo editable (hoy seedeado con los 5 tramos de la spec) - preparado
+-- para que una futura pantalla de Configuracion lo edite sin tocar el schema.
+CREATE TABLE semaforo_config (
+  id          SERIAL PRIMARY KEY,
+  rango_min   INTEGER NOT NULL,
+  rango_max   INTEGER NOT NULL,
+  color       TEXT NOT NULL,
+  etiqueta    TEXT NOT NULL,
+  orden       INTEGER NOT NULL
+);
