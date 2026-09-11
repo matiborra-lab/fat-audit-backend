@@ -63,8 +63,18 @@ const ok =
   resultado.resultado === ESPERADO_RESULTADO &&
   resultado.semaforo === ESPERADO_SEMAFORO;
 
-if (ok) {
-  console.log('\n✅ El motor de puntaje simplificado calcula correctamente.');
+// Segundo caso: mismos datos pero SIN el umbral por sector, para probar el
+// umbral GENERAL de aprobación (configurable por plantilla) de forma
+// aislada. Total sigue dando 70% - con puntajeMinimoAprobacion=0.75 (75%)
+// tiene que desaprobar solo por eso, aunque no haya ningún umbral crítico
+// específico configurado.
+const resultado2 = calcularPuntaje({ sectores, areas, items, respuestas, umbrales: [], semaforoConfig, puntajeMinimoAprobacion: 0.75 });
+console.log('\nCaso 2 (umbral general 75%, sin umbrales por sector/área):');
+console.log('Puntaje total:', resultado2.puntajeTotal, '· Resultado:', resultado2.resultado, '(esperado DESAPROBADA)');
+const ok2 = resultado2.resultado === 'DESAPROBADA' && resultado2.detalle.noAlcanzaMinimoGeneral === true;
+
+if (ok && ok2) {
+  console.log('\n✅ El motor de puntaje simplificado calcula correctamente (incluye umbral general).');
   process.exit(0);
 } else {
   console.error('\n❌ El motor de puntaje NO coincide con lo esperado.');

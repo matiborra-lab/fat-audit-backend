@@ -100,13 +100,16 @@ function registrarRutasPlantillas(app) {
   });
 
   app.post('/api/plantillas', requireBuilder, async (req, res) => {
-    const { nombre, descripcion, tipo, weighting_mode, roles_permitidos } = req.body;
+    const { nombre, descripcion, tipo, weighting_mode, roles_permitidos, puntaje_minimo_aprobacion } = req.body;
     if (!nombre) return res.status(400).json({ error: 'Falta el campo: nombre' });
+    if (puntaje_minimo_aprobacion != null && (puntaje_minimo_aprobacion < 0 || puntaje_minimo_aprobacion > 1)) {
+      return res.status(400).json({ error: 'puntaje_minimo_aprobacion tiene que estar entre 0 y 1' });
+    }
     try {
       const { rows } = await db.query(
-        `INSERT INTO audit_templates (nombre, descripcion, tipo, weighting_mode, roles_permitidos, creado_por)
-         VALUES ($1,$2,COALESCE($3,'INTERNA'),COALESCE($4,'CON_PESO'),COALESCE($5,ARRAY['ADMIN','AUDITOR']::TEXT[]),$6) RETURNING *`,
-        [nombre, descripcion || null, tipo, weighting_mode, roles_permitidos, req.usuario.usuarioId]
+        `INSERT INTO audit_templates (nombre, descripcion, tipo, weighting_mode, roles_permitidos, puntaje_minimo_aprobacion, creado_por)
+         VALUES ($1,$2,COALESCE($3,'INTERNA'),COALESCE($4,'CON_PESO'),COALESCE($5,ARRAY['ADMIN','AUDITOR']::TEXT[]),$6,$7) RETURNING *`,
+        [nombre, descripcion || null, tipo, weighting_mode, roles_permitidos, puntaje_minimo_aprobacion ?? null, req.usuario.usuarioId]
       );
       res.status(201).json(rows[0]);
     } catch (err) {
@@ -116,6 +119,15 @@ function registrarRutasPlantillas(app) {
 
   app.patch('/api/plantillas/:id', requireBuilder, async (req, res) => {
     const { nombre, descripcion, tipo, weighting_mode, roles_permitidos, aplica_todas_sucursales } = req.body;
+    // A diferencia de los demas campos (que se ignoran si no vienen), este
+    // necesita poder mandarse en null explicito para BORRAR el umbral
+    // general ("sin minimo") - por eso se distingue "no vino en el body" de
+    // "vino como null a proposito", en vez de usar COALESCE como el resto.
+    const tienePuntajeMinimo = Object.prototype.hasOwnProperty.call(req.body, 'puntaje_minimo_aprobacion');
+    const puntajeMinimoAprobacion = req.body.puntaje_minimo_aprobacion;
+    if (tienePuntajeMinimo && puntajeMinimoAprobacion != null && (puntajeMinimoAprobacion < 0 || puntajeMinimoAprobacion > 1)) {
+      return res.status(400).json({ error: 'puntaje_minimo_aprobacion tiene que estar entre 0 y 1' });
+    }
     try {
       const { rows: actual } = await db.query('SELECT estado FROM audit_templates WHERE id = $1', [req.params.id]);
       if (!actual[0]) return res.status(404).json({ error: 'Plantilla no encontrada' });
@@ -124,8 +136,9 @@ function registrarRutasPlantillas(app) {
         `UPDATE audit_templates SET nombre = COALESCE($1,nombre), descripcion = COALESCE($2,descripcion),
          tipo = COALESCE($3,tipo), weighting_mode = COALESCE($4,weighting_mode),
          roles_permitidos = COALESCE($5,roles_permitidos), aplica_todas_sucursales = COALESCE($6,aplica_todas_sucursales),
+         puntaje_minimo_aprobacion = CASE WHEN $8 THEN $9 ELSE puntaje_minimo_aprobacion END,
          actualizado_en = now() WHERE id = $7 RETURNING *`,
-        [nombre ?? null, descripcion ?? null, tipo ?? null, weighting_mode ?? null, roles_permitidos ?? null, aplica_todas_sucursales ?? null, req.params.id]
+        [nombre ?? null, descripcion ?? null, tipo ?? null, weighting_mode ?? null, roles_permitidos ?? null, aplica_todas_sucursales ?? null, req.params.id, tienePuntajeMinimo, puntajeMinimoAprobacion ?? null]
       );
       res.json(rows[0]);
     } catch (err) {

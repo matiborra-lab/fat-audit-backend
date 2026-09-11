@@ -61,7 +61,7 @@ function pesoEfectivo(item, grupo) {
   return sinPeso.length > 0 ? 1 / sinPeso.length : 0;
 }
 
-function calcularPuntaje({ sectores, areas, items, respuestas, umbrales, semaforoConfig }) {
+function calcularPuntaje({ sectores, areas, items, respuestas, umbrales, semaforoConfig, puntajeMinimoAprobacion }) {
   const respuestaPorItem = new Map(respuestas.map((r) => [r.item_id, r]));
 
   // 1) Por item: valor normalizado (excluye no_aplica, sin respuesta, o
@@ -156,7 +156,12 @@ function calcularPuntaje({ sectores, areas, items, respuestas, umbrales, semafor
       umbralesFallidos.push({ ...u, score });
     }
   }
-  const resultado = umbralesFallidos.length > 0 ? 'DESAPROBADA' : 'APROBADA';
+  // Umbral GENERAL de aprobacion (configurable por plantilla, ver
+  // audit_templates.puntaje_minimo_aprobacion) - independiente de los
+  // umbrales por sector/area: si el puntaje total no lo alcanza, tambien
+  // desaprueba, aunque ningun umbral especifico haya fallado.
+  const noAlcanzaMinimoGeneral = puntajeMinimoAprobacion != null && puntajeTotal < Number(puntajeMinimoAprobacion);
+  const resultado = (umbralesFallidos.length > 0 || noAlcanzaMinimoGeneral) ? 'DESAPROBADA' : 'APROBADA';
 
   // 7) Semaforo.
   const puntajePct = Math.round(puntajeTotal * 100);
@@ -171,6 +176,8 @@ function calcularPuntaje({ sectores, areas, items, respuestas, umbrales, semafor
       sectores: detalleSectores,
       areas: detalleAreas,
       umbralesFallidos,
+      puntajeMinimoAprobacion: puntajeMinimoAprobacion != null ? Number(puntajeMinimoAprobacion) : null,
+      noAlcanzaMinimoGeneral,
     },
   };
 }

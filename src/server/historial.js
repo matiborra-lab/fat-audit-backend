@@ -11,7 +11,7 @@ module.exports = function registrarRutasHistorial(app) {
   app.get('/api/historial', async (req, res) => {
     const { sucursal_id, tipo, template_id, estado, desde, hasta, puntaje_min, puntaje_max } = req.query;
     let sql = `SELECT r.id, r.template_id, t.nombre AS plantilla_nombre, r.sucursal_id, s.nombre AS sucursal_nombre,
-                      r.tipo, r.estado, r.iniciada_en, r.completada_en, r.puntaje_total, r.semaforo, r.resultado,
+                      r.tipo, r.estado, r.creado_en, r.iniciada_en, r.completada_en, r.puntaje_total, r.semaforo, r.resultado,
                       u.nombre AS auditor_nombre, r.responsable_nombre, r.origen_run_id
                FROM audit_runs r
                JOIN audit_templates t ON t.id = r.template_id
@@ -65,8 +65,10 @@ module.exports = function registrarRutasHistorial(app) {
          ) x WHERE rn <= 2`,
         [sucursalIds]
       );
-      const ultimas = conRn.filter((r) => r.rn === 1);
-      const anteriorPorSucursal = new Map(conRn.filter((r) => r.rn === 2).map((a) => [a.sucursal_id, Number(a.puntaje_total)]));
+      // OJO: pg devuelve ROW_NUMBER() (bigint) como STRING, no number - "1"
+      // === 1 da false siempre. Hay que convertir antes de comparar.
+      const ultimas = conRn.filter((r) => Number(r.rn) === 1);
+      const anteriorPorSucursal = new Map(conRn.filter((r) => Number(r.rn) === 2).map((a) => [a.sucursal_id, Number(a.puntaje_total)]));
 
       const ranking = sucursales.map((s) => {
         const ultima = ultimas.find((u) => u.sucursal_id === s.id);

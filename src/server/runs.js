@@ -116,6 +116,7 @@ module.exports = function registrarRutasRuns(app) {
       if (!plantilla.roles_permitidos.includes(req.usuario.rol)) return res.status(403).json({ error: 'Tu rol no puede ejecutar esta plantilla' });
 
       const estructura = await cargarEstructura(template_id);
+      estructura.puntaje_minimo_aprobacion = plantilla.puntaje_minimo_aprobacion;
       const { rows } = await db.query(
         `INSERT INTO audit_runs (template_id, estructura_snapshot, sucursal_id, tipo, auditor_user_id, responsable_nombre)
          VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
@@ -291,6 +292,7 @@ module.exports = function registrarRutasRuns(app) {
       const resultadoCalculo = calcularPuntaje({
         sectores: estructura.sectores, areas: estructura.areas, items: estructura.items,
         respuestas, umbrales: estructura.umbrales, semaforoConfig,
+        puntajeMinimoAprobacion: estructura.puntaje_minimo_aprobacion,
       });
 
       const { firma_nombre, firma_responsable } = req.body;

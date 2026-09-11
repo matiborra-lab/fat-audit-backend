@@ -64,6 +64,10 @@ CREATE TABLE audit_templates (
   roles_permitidos        TEXT[] NOT NULL DEFAULT ARRAY['ADMIN', 'AUDITOR']::TEXT[],
                                           -- quien puede EJECUTAR esta plantilla ('GERENTE' se suma explicitamente
                                           -- si la plantilla lo habilita para auditorias internas del propio local)
+  puntaje_minimo_aprobacion NUMERIC(5,4),  -- umbral GENERAL (0..1): si el puntaje total no lo alcanza, la
+                                          -- auditoria queda DESAPROBADA - independiente de los umbrales_criticos
+                                          -- por sector/area. NULL = sin minimo general (solo deciden los
+                                          -- umbrales_criticos, si hay alguno configurado)
   creado_por              INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
   creado_en               TIMESTAMPTZ NOT NULL DEFAULT now(),
   actualizado_en          TIMESTAMPTZ NOT NULL DEFAULT now()
