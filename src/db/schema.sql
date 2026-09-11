@@ -276,6 +276,11 @@ CREATE TABLE schedule_events (
   items_seleccionados   INTEGER[],           -- idem: ids de item DENTRO del snapshot de origen_run_id a incluir
   recordatorio_enviado_en TIMESTAMPTZ,        -- recordatorio del dia de realizacion (ver src/recordatorios) -
                                               -- evita mandarlo mas de una vez por evento
+  asignacion_confirmada BOOLEAN NOT NULL DEFAULT true, -- solo TURNO: false = recien creado/modificado, se ve
+                                              -- gris con reloj y NO se notifica hasta que el gerente confirme
+                                              -- con "Asignar turnos" (default true para no afectar otros tipos)
+  notificado_en         TIMESTAMPTZ,         -- solo TURNO: cuando se le aviso al responsable por ultima vez -
+                                              -- permite reintentar si la notificacion fallo (ver calendario.js)
   creado_por            INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
   creado_en             TIMESTAMPTZ NOT NULL DEFAULT now()
 );

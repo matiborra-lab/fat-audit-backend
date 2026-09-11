@@ -358,10 +358,13 @@ module.exports = function registrarRutasCalendario(app) {
   }
 
   // Alta rápida de un turno (el "+" de la grilla semanal/mensual): un solo
-  // colaborador, un solo día.
-  // Body: { sucursal_id, fecha (YYYY-MM-DD), turno_tipo, responsable_user_id, puesto, notificar }
+  // colaborador, un solo día. Queda PENDIENTE de confirmar (gris, sin
+  // notificar) hasta que el gerente lo confirme con "Asignar turnos" (ver
+  // POST /api/calendario/turnos/asignar) - así nunca se notifica antes de
+  // que la asignación esté efectivamente confirmada.
+  // Body: { sucursal_id, fecha (YYYY-MM-DD), turno_tipo, responsable_user_id, puesto }
   app.post('/api/calendario/turnos', async (req, res) => {
-    const { sucursal_id, fecha, turno_tipo, responsable_user_id, puesto, notificar } = req.body;
+    const { sucursal_id, fecha, turno_tipo, responsable_user_id, puesto } = req.body;
     if (!sucursal_id || !fecha || !turno_tipo || !responsable_user_id || !puesto) {
       return res.status(400).json({ error: 'Faltan campos: sucursal_id, fecha, turno_tipo, responsable_user_id, puesto' });
     }
@@ -376,14 +379,10 @@ module.exports = function registrarRutasCalendario(app) {
       if (!horario?.habilitado) return res.status(400).json({ error: 'Este turno no está habilitado ese día para esta sucursal (configuralo en la ficha de la sucursal)' });
       const { inicio, duracionMinutos } = armarOcurrencia(new Date(`${fecha}T00:00:00`), horario);
       const { rows } = await db.query(
-        `INSERT INTO schedule_events (sucursal_id, tipo, titulo, responsable_user_id, puesto, turno_tipo, fecha_hora, duracion_minutos, creado_por)
-         VALUES ($1,'TURNO',$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        `INSERT INTO schedule_events (sucursal_id, tipo, titulo, responsable_user_id, puesto, turno_tipo, fecha_hora, duracion_minutos, creado_por, asignacion_confirmada)
+         VALUES ($1,'TURNO',$2,$3,$4,$5,$6,$7,$8,false) RETURNING *`,
         [sucursal_id, `Turno ${turno_tipo === 'DIURNO' ? 'diurno' : 'nocturno'}`, responsable_user_id, puesto, turno_tipo, inicio.toISOString(), duracionMinutos, req.usuario.usuarioId]
       );
-      if (notificar) {
-        await crearNotificacion(responsable_user_id, 'TURNOS_ASIGNADOS', 'Nuevo turno asignado',
-          'Ya podés ver tu turno asignado en el calendario.', { sucursal_id, evento_id: rows[0].id });
-      }
       res.status(201).json(rows[0]);
     } catch (err) {
       res.status(err.status || 400).json({ error: err.message });
@@ -393,10 +392,11 @@ module.exports = function registrarRutasCalendario(app) {
   // "Programar asignaciones": un patrón que se repite en ciertos días de la
   // semana, entre una fecha desde y una fecha hasta (opcional - ver
   // generarOcurrenciasTurnoProgramado y DIAS_VENTANA_SIN_FIN si se omite).
+  // Igual que el alta rápida, quedan PENDIENTES de confirmar (ver arriba).
   // Body: { sucursal_id, responsable_user_id, puesto, turno_tipo, dias_semana: [0..6],
-  //         fecha_desde, fecha_hasta (opcional), notificar }
+  //         fecha_desde, fecha_hasta (opcional) }
   app.post('/api/calendario/turnos/programar', async (req, res) => {
-    const { sucursal_id, responsable_user_id, puesto, turno_tipo, dias_semana, fecha_desde, fecha_hasta, notificar } = req.body;
+    const { sucursal_id, responsable_user_id, puesto, turno_tipo, dias_semana, fecha_desde, fecha_hasta } = req.body;
     if (!sucursal_id || !responsable_user_id || !puesto || !turno_tipo || !Array.isArray(dias_semana) || !dias_semana.length || !fecha_desde) {
       return res.status(400).json({ error: 'Faltan campos: sucursal_id, responsable_user_id, puesto, turno_tipo, dias_semana, fecha_desde' });
     }
@@ -418,18 +418,14 @@ module.exports = function registrarRutasCalendario(app) {
       if (!ocurrencias.length) return res.status(400).json({ error: 'El rango de fechas no incluye ninguno de los días elegidos' });
       const filas = ocurrencias.map(({ inicio, duracionMinutos }) => [
         sucursal_id, 'TURNO', `Turno ${turno_tipo === 'DIURNO' ? 'diurno' : 'nocturno'}`, responsable_user_id, puesto, turno_tipo,
-        inicio.toISOString(), duracionMinutos, req.usuario.usuarioId,
+        inicio.toISOString(), duracionMinutos, req.usuario.usuarioId, false,
       ]);
       const insertados = await db.bulkInsert(db.pool, 'schedule_events',
-        ['sucursal_id', 'tipo', 'titulo', 'responsable_user_id', 'puesto', 'turno_tipo', 'fecha_hora', 'duracion_minutos', 'creado_por'],
+        ['sucursal_id', 'tipo', 'titulo', 'responsable_user_id', 'puesto', 'turno_tipo', 'fecha_hora', 'duracion_minutos', 'creado_por', 'asignacion_confirmada'],
         filas, 'id');
       const serieId = insertados[0].id;
       await db.query('UPDATE schedule_events SET serie_id = $1 WHERE id = ANY($2)', [serieId, insertados.map((r) => r.id)]);
 
-      if (notificar) {
-        await crearNotificacion(responsable_user_id, 'TURNOS_ASIGNADOS', 'Nuevos turnos asignados',
-          `Se te asignaron ${insertados.length} turnos.`, { sucursal_id });
-      }
       res.status(201).json({
         creados: insertados.length,
         ventanaSinFin: !fecha_hasta ? DIAS_VENTANA_SIN_FIN : null,
@@ -437,6 +433,88 @@ module.exports = function registrarRutasCalendario(app) {
       });
     } catch (err) {
       res.status(err.status || 400).json({ error: err.message });
+    }
+  });
+
+  // Agrupa una lista de turnos (con responsable_user_id + responsable_nombre
+  // ya resueltos) por responsable y le manda UNA notificación consolidada a
+  // cada uno - si crearNotificacion tira (falla el insert/push), ese
+  // responsable queda en `fallidos` para que el gerente pueda reintentar
+  // (ver POST /api/calendario/turnos/notificar) en vez de perderse el aviso
+  // en silencio.
+  async function notificarResponsablesDeTurnos(turnos) {
+    const porResponsable = new Map(); // responsable_user_id -> { nombre, eventoIds: [] }
+    for (const t of turnos) {
+      if (!t.responsable_user_id) continue;
+      if (!porResponsable.has(t.responsable_user_id)) porResponsable.set(t.responsable_user_id, { nombre: t.responsable_nombre, eventoIds: [] });
+      porResponsable.get(t.responsable_user_id).eventoIds.push(t.id);
+    }
+    const notificados = [];
+    const fallidos = [];
+    for (const [usuarioId, { nombre, eventoIds }] of porResponsable) {
+      try {
+        await crearNotificacion(usuarioId, 'TURNOS_ASIGNADOS',
+          eventoIds.length === 1 ? 'Turno asignado' : 'Turnos asignados',
+          eventoIds.length === 1 ? 'Ya podés ver tu turno asignado en el calendario.' : `Se te asignaron ${eventoIds.length} turnos.`,
+          { evento_ids: eventoIds });
+        await db.query('UPDATE schedule_events SET notificado_en = now() WHERE id = ANY($1)', [eventoIds]);
+        notificados.push({ usuario_id: usuarioId, nombre, evento_ids: eventoIds });
+      } catch (err) {
+        fallidos.push({ usuario_id: usuarioId, nombre, evento_ids: eventoIds });
+      }
+    }
+    return { notificados, fallidos };
+  }
+
+  // "Asignar turnos": confirma TODOS los turnos pendientes (asignacion_
+  // confirmada = false) de una sucursal dentro de un rango de fechas (la
+  // vista/período que el gerente tiene abierto) y, si se pide, notifica a
+  // cada responsable que recibió un turno nuevo o modificado en esta tanda -
+  // nunca a quienes no tuvieron cambios (porque esos ya estaban confirmados).
+  // Body: { sucursal_id, desde, hasta (YYYY-MM-DD), notificar }
+  app.post('/api/calendario/turnos/asignar', async (req, res) => {
+    const { sucursal_id, desde, hasta, notificar = true } = req.body;
+    if (!sucursal_id || !desde || !hasta) return res.status(400).json({ error: 'Faltan campos: sucursal_id, desde, hasta' });
+    if (!puedeGestionarTurnos(req.usuario, sucursal_id)) return res.status(403).json({ error: 'No podés gestionar los turnos de esta sucursal' });
+    try {
+      const { rows: pendientes } = await db.query(
+        `SELECT e.*, u.nombre AS responsable_nombre FROM schedule_events e LEFT JOIN usuarios u ON u.id = e.responsable_user_id
+         WHERE e.tipo = 'TURNO' AND e.sucursal_id = $1 AND e.asignacion_confirmada = false
+           AND e.fecha_hora >= $2 AND e.fecha_hora < ($3::date + 1)`,
+        [sucursal_id, desde, hasta]
+      );
+      if (pendientes.length === 0) return res.json({ confirmados: 0, notificados: [], fallidos: [] });
+      await db.query(
+        `UPDATE schedule_events SET asignacion_confirmada = true WHERE id = ANY($1)`,
+        [pendientes.map((t) => t.id)]
+      );
+      const { notificados, fallidos } = notificar ? await notificarResponsablesDeTurnos(pendientes) : { notificados: [], fallidos: [] };
+      res.json({ confirmados: pendientes.length, notificados, fallidos });
+    } catch (err) {
+      res.status(err.status || 400).json({ error: err.message });
+    }
+  });
+
+  // Reintento manual de notificación (para los responsables que quedaron en
+  // `fallidos` en /asignar) - reusa el mismo agrupador, sin volver a tocar
+  // asignacion_confirmada (ya estaba en true).
+  app.post('/api/calendario/turnos/notificar', async (req, res) => {
+    const { ids = [] } = req.body;
+    if (!ids.length) return res.status(400).json({ error: 'Falta el campo: ids' });
+    try {
+      const { rows: eventos } = await db.query(
+        `SELECT e.*, u.nombre AS responsable_nombre FROM schedule_events e LEFT JOIN usuarios u ON u.id = e.responsable_user_id
+         WHERE e.id = ANY($1) AND e.tipo = 'TURNO'`,
+        [ids]
+      );
+      const sucursalIds = new Set(eventos.map((e) => e.sucursal_id));
+      for (const sId of sucursalIds) {
+        if (!puedeGestionarTurnos(req.usuario, sId)) return res.status(403).json({ error: 'No podés gestionar los turnos de esta sucursal' });
+      }
+      const { notificados, fallidos } = await notificarResponsablesDeTurnos(eventos);
+      res.json({ notificados, fallidos });
+    } catch (err) {
+      res.status(400).json({ error: err.message });
     }
   });
 
