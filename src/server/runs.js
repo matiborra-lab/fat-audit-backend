@@ -98,6 +98,13 @@ async function crearRun({ templateId, sucursalId, tipo, rol, auditorUserId, resp
   if (!plantilla.roles_permitidos.includes(rol)) throw Object.assign(new Error('Tu rol no puede ejecutar esta plantilla'), { status: 403 });
 
   const tipoFinal = tipo || plantilla.tipo;
+  // Un Gerente nunca puede ejecutar una auditoría de marca, sin importar lo
+  // que diga roles_permitidos de la plantilla (esa lista habilita quién
+  // puede correr la plantilla, pero esta regla de tipo es absoluta y no se
+  // configura por plantilla). Sí puede hacer internas y seguimientos.
+  if (rol === 'GERENTE' && tipoFinal === 'MARCA') {
+    throw Object.assign(new Error('Como gerente no podés ejecutar una auditoría de marca'), { status: 403 });
+  }
   const estructura = await cargarEstructura(templateId);
   estructura.puntaje_minimo_aprobacion = plantilla.puntaje_minimo_aprobacion;
   const { rows } = await db.query(
@@ -116,13 +123,19 @@ module.exports = function registrarRutasRuns(app) {
       return res.status(403).json({ error: 'No tenés acceso a esa sucursal' });
     }
     try {
+      // Un Gerente nunca ve plantillas de marca acá, sin importar
+      // roles_permitidos (ver misma regla en crearRun).
+      const params = [req.usuario.rol, sucursalId];
+      let filtroTipo = '';
+      if (req.usuario.rol === 'GERENTE') filtroTipo = ` AND t.tipo != 'MARCA'`;
       const { rows } = await db.query(
         `SELECT t.* FROM audit_templates t
          WHERE t.estado = 'PUBLICADA'
            AND $1 = ANY(t.roles_permitidos)
            AND (t.aplica_todas_sucursales OR EXISTS (SELECT 1 FROM template_sucursales ts WHERE ts.template_id = t.id AND ts.sucursal_id = $2))
+           ${filtroTipo}
          ORDER BY t.nombre`,
-        [req.usuario.rol, sucursalId]
+        params
       );
       res.json(rows);
     } catch (err) {
@@ -131,11 +144,13 @@ module.exports = function registrarRutasRuns(app) {
   });
 
   app.post('/api/runs', async (req, res) => {
-    const { template_id, sucursal_id, tipo, responsable_nombre } = req.body;
-    if (!template_id || !sucursal_id || !tipo) return res.status(400).json({ error: 'Faltan campos: template_id, sucursal_id, tipo' });
+    const { template_id, sucursal_id, responsable_nombre } = req.body;
+    if (!template_id || !sucursal_id) return res.status(400).json({ error: 'Faltan campos: template_id, sucursal_id' });
     if (!puedeAccederSucursal(req.usuario, sucursal_id)) return res.status(403).json({ error: 'No tenés acceso a esa sucursal' });
     try {
-      const run = await crearRun({ templateId: template_id, sucursalId: sucursal_id, tipo, rol: req.usuario.rol, auditorUserId: req.usuario.usuarioId, responsableNombre: responsable_nombre });
+      // El tipo NO se pide acá: lo hereda siempre de la plantilla elegida
+      // (ver crearRun) - así no hay forma de que el usuario lo contradiga.
+      const run = await crearRun({ templateId: template_id, sucursalId: sucursal_id, rol: req.usuario.rol, auditorUserId: req.usuario.usuarioId, responsableNombre: responsable_nombre });
       res.status(201).json(run);
     } catch (err) {
       res.status(err.status || 400).json({ error: err.message });

@@ -70,6 +70,42 @@ async function cargarEstructura(templateId) {
   };
 }
 
+// Copia sectores/areas/items/reglas/umbrales/sucursales de `origen` (fila
+// completa de audit_templates) hacia la plantilla `nueva` recien insertada -
+// usado tanto por "nueva version" (misma familia, ver plantilla_base_id)
+// como por "duplicar" (familia nueva e independiente). Se pipelinea con
+// bulkInsert (un INSERT multi-fila por nivel) en vez de una query por fila,
+// para no hacer ~150 viajes de ida y vuelta secuenciales al copiar una
+// plantilla grande.
+async function copiarEstructura(client, origen, nueva) {
+  const estructura = await cargarEstructura(origen.id);
+
+  const sectorRows = await db.bulkInsert(client, 'audit_sectores', ['template_id', 'nombre', 'orden'],
+    estructura.sectores.map((s) => [nueva.id, s.nombre, s.orden]));
+  const sectorIds = {};
+  estructura.sectores.forEach((s, i) => { sectorIds[s.id] = sectorRows[i].id; });
+
+  const areaRows = await db.bulkInsert(client, 'audit_areas', ['template_id', 'nombre', 'orden', 'peso'],
+    estructura.areas.map((a) => [nueva.id, a.nombre, a.orden, a.peso]));
+  const areaIds = {};
+  estructura.areas.forEach((a, i) => { areaIds[a.id] = areaRows[i].id; });
+
+  const itemRows = await db.bulkInsert(client, 'audit_items',
+    ['sector_id', 'area_id', 'texto', 'ayuda_texto', 'tipo_respuesta', 'opciones_json', 'peso', 'critico', 'informe_in_situ', 'evidencia_requerida', 'permite_no_aplica', 'orden'],
+    estructura.items.map((it) => [sectorIds[it.sector_id], areaIds[it.area_id], it.texto, it.ayuda_texto, it.tipo_respuesta, it.opciones_json, it.peso, it.critico, it.informe_in_situ, it.evidencia_requerida, it.permite_no_aplica, it.orden]));
+  const itemIds = itemRows.map((r) => r.id);
+  const reglasFilas = estructura.items.flatMap((it, i) => (it.reglas || []).map((regla) => [itemIds[i], regla.condicion_json, regla.acciones_json]));
+  await db.bulkInsert(client, 'item_reglas', ['item_id', 'condicion_json', 'acciones_json'], reglasFilas);
+
+  await db.bulkInsert(client, 'umbrales_criticos', ['template_id', 'tipo', 'sector_id', 'area_id', 'porcentaje_minimo'],
+    estructura.umbrales.map((u) => [nueva.id, u.tipo, u.sector_id ? sectorIds[u.sector_id] : null, u.area_id ? areaIds[u.area_id] : null, u.porcentaje_minimo]));
+
+  if (!origen.aplica_todas_sucursales) {
+    await db.bulkInsert(client, 'template_sucursales', ['template_id', 'sucursal_id'],
+      estructura.sucursal_ids.map((sucursalId) => [nueva.id, sucursalId]));
+  }
+}
+
 function registrarRutasPlantillas(app) {
   app.get('/api/plantillas', async (req, res) => {
     try {
@@ -268,42 +304,44 @@ function registrarRutasPlantillas(app) {
       const nuevaVersion = maxVersionRows[0].max + 1;
 
       const { rows: nuevaRows } = await client.query(
-        `INSERT INTO audit_templates (plantilla_base_id, nombre, descripcion, tipo, version, estado, weighting_mode, aplica_todas_sucursales, roles_permitidos, creado_por)
-         VALUES ($1,$2,$3,$4,$5,'BORRADOR',$6,$7,$8,$9) RETURNING *`,
-        [familiaId, origen.nombre, origen.descripcion, origen.tipo, nuevaVersion, origen.weighting_mode, origen.aplica_todas_sucursales, origen.roles_permitidos, req.usuario.usuarioId]
+        `INSERT INTO audit_templates (plantilla_base_id, nombre, descripcion, tipo, version, estado, weighting_mode, aplica_todas_sucursales, roles_permitidos, puntaje_minimo_aprobacion, creado_por)
+         VALUES ($1,$2,$3,$4,$5,'BORRADOR',$6,$7,$8,$9,$10) RETURNING *`,
+        [familiaId, origen.nombre, origen.descripcion, origen.tipo, nuevaVersion, origen.weighting_mode, origen.aplica_todas_sucursales, origen.roles_permitidos, origen.puntaje_minimo_aprobacion, req.usuario.usuarioId]
       );
       const nueva = nuevaRows[0];
+      await copiarEstructura(client, origen, nueva);
+      await client.query('COMMIT');
+      res.status(201).json(nueva);
+    } catch (err) {
+      await client.query('ROLLBACK');
+      res.status(err.status || 400).json({ error: err.message });
+    } finally {
+      client.release();
+    }
+  });
 
-      // Igual que en PUT /estructura: se pipelinean las queries con
-      // bulkInsert (ver db/index.js): un solo INSERT multi-fila por nivel
-      // en vez de una query por fila, para no hacer ~150 viajes de ida y
-      // vuelta secuenciales al copiar una plantilla grande.
-      const estructura = await cargarEstructura(origen.id);
+  // Duplica una plantilla en una familia completamente nueva e
+  // independiente (plantilla_base_id NULL, version 1, BORRADOR) - a
+  // diferencia de "nueva version", esto no reemplaza ni versiona la
+  // original: quedan dos plantillas separadas, pensado para arrancar una
+  // auditoría distinta a partir de una ya armada en vez de tipear todo de
+  // nuevo.
+  app.post('/api/plantillas/:id/duplicar', requireBuilder, async (req, res) => {
+    const client = await db.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const { rows: origenRows } = await client.query('SELECT * FROM audit_templates WHERE id = $1', [req.params.id]);
+      const origen = origenRows[0];
+      if (!origen) throw Object.assign(new Error('Plantilla no encontrada'), { status: 404 });
 
-      const sectorRows = await db.bulkInsert(client, 'audit_sectores', ['template_id', 'nombre', 'orden'],
-        estructura.sectores.map((s) => [nueva.id, s.nombre, s.orden]));
-      const sectorIds = {};
-      estructura.sectores.forEach((s, i) => { sectorIds[s.id] = sectorRows[i].id; });
-
-      const areaRows = await db.bulkInsert(client, 'audit_areas', ['template_id', 'nombre', 'orden', 'peso'],
-        estructura.areas.map((a) => [nueva.id, a.nombre, a.orden, a.peso]));
-      const areaIds = {};
-      estructura.areas.forEach((a, i) => { areaIds[a.id] = areaRows[i].id; });
-
-      const itemRows = await db.bulkInsert(client, 'audit_items',
-        ['sector_id', 'area_id', 'texto', 'ayuda_texto', 'tipo_respuesta', 'opciones_json', 'peso', 'critico', 'informe_in_situ', 'evidencia_requerida', 'permite_no_aplica', 'orden'],
-        estructura.items.map((it) => [sectorIds[it.sector_id], areaIds[it.area_id], it.texto, it.ayuda_texto, it.tipo_respuesta, it.opciones_json, it.peso, it.critico, it.informe_in_situ, it.evidencia_requerida, it.permite_no_aplica, it.orden]));
-      const itemIds = itemRows.map((r) => r.id);
-      const reglasFilas = estructura.items.flatMap((it, i) => (it.reglas || []).map((regla) => [itemIds[i], regla.condicion_json, regla.acciones_json]));
-      await db.bulkInsert(client, 'item_reglas', ['item_id', 'condicion_json', 'acciones_json'], reglasFilas);
-
-      await db.bulkInsert(client, 'umbrales_criticos', ['template_id', 'tipo', 'sector_id', 'area_id', 'porcentaje_minimo'],
-        estructura.umbrales.map((u) => [nueva.id, u.tipo, u.sector_id ? sectorIds[u.sector_id] : null, u.area_id ? areaIds[u.area_id] : null, u.porcentaje_minimo]));
-
-      if (!origen.aplica_todas_sucursales) {
-        await db.bulkInsert(client, 'template_sucursales', ['template_id', 'sucursal_id'],
-          estructura.sucursal_ids.map((sucursalId) => [nueva.id, sucursalId]));
-      }
+      const nombreNuevo = (req.body.nombre || `${origen.nombre} (copia)`).trim();
+      const { rows: nuevaRows } = await client.query(
+        `INSERT INTO audit_templates (nombre, descripcion, tipo, version, estado, weighting_mode, aplica_todas_sucursales, roles_permitidos, puntaje_minimo_aprobacion, creado_por)
+         VALUES ($1,$2,$3,1,'BORRADOR',$4,$5,$6,$7,$8) RETURNING *`,
+        [nombreNuevo, origen.descripcion, origen.tipo, origen.weighting_mode, origen.aplica_todas_sucursales, origen.roles_permitidos, origen.puntaje_minimo_aprobacion, req.usuario.usuarioId]
+      );
+      const nueva = nuevaRows[0];
+      await copiarEstructura(client, origen, nueva);
       await client.query('COMMIT');
       res.status(201).json(nueva);
     } catch (err) {
