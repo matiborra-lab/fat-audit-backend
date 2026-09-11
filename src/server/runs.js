@@ -26,8 +26,12 @@ async function obtenerRunOForbidden(req, res) {
 function evaluarCondicion(operador, valorRespuesta, valorCondicion) {
   if (valorRespuesta == null) return false;
   switch (operador) {
-    case '=': return valorRespuesta === valorCondicion;
-    case '!=': return valorRespuesta !== valorCondicion;
+    // Comparación por texto, no estricta: el valor de la condición se carga
+    // como texto en el constructor (ver ReglasEditor en el frontend) pero la
+    // respuesta puede ser numérica (ESCALA_5) o booleana (CHECKBOX) - "3" y 3
+    // tienen que matchear igual.
+    case '=': return String(valorRespuesta) === String(valorCondicion);
+    case '!=': return String(valorRespuesta) !== String(valorCondicion);
     case '<': return Number(valorRespuesta) < Number(valorCondicion);
     case '<=': return Number(valorRespuesta) <= Number(valorCondicion);
     case '>': return Number(valorRespuesta) > Number(valorCondicion);

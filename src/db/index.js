@@ -22,4 +22,32 @@ function query(text, params) {
   return pool.query(text, params);
 }
 
-module.exports = { pool, query };
+// Inserta muchas filas en UNA sola query (un solo INSERT con varios grupos
+// VALUES) en vez de una query por fila - evita N viajes de ida y vuelta a
+// la base, que contra una base remota (Railway, etc.) se nota mucho en
+// tablas como audit_items (decenas o cientos de filas por plantilla).
+// IMPORTANTE: no usar await en un loop llamando a esto con el mismo client
+// sin esperar cada llamada - pg no pipelinea queries concurrentes en una
+// misma conexión (las encola y avisa que es una practica deprecada).
+// `filas` es un array de arrays de valores, en el mismo orden que
+// `columnas`. Devuelve las filas de RETURNING en el MISMO ORDEN que
+// `filas` (Postgres preserva el orden de entrada en un INSERT ... VALUES
+// simple, sin ON CONFLICT ni triggers que puedan reordenar).
+async function bulkInsert(client, tabla, columnas, filas, returning = 'id') {
+  if (filas.length === 0) return [];
+  const params = [];
+  const placeholders = filas.map((fila) => {
+    const grupo = fila.map((valor) => {
+      params.push(valor);
+      return '$' + params.length;
+    });
+    return '(' + grupo.join(',') + ')';
+  });
+  const { rows } = await client.query(
+    `INSERT INTO ${tabla} (${columnas.join(',')}) VALUES ${placeholders.join(',')} RETURNING ${returning}`,
+    params
+  );
+  return rows;
+}
+
+module.exports = { pool, query, bulkInsert };

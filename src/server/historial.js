@@ -92,7 +92,7 @@ module.exports = function registrarRutasHistorial(app) {
       );
       const areasAcumuladas = new Map(); // nombre -> {suma, n}
       for (const r of recientes) {
-        for (const a of r.detalle_calculo?.areasGlobal || []) {
+        for (const a of r.detalle_calculo?.areas || []) {
           if (!areasAcumuladas.has(a.nombre)) areasAcumuladas.set(a.nombre, { suma: 0, n: 0 });
           const acc = areasAcumuladas.get(a.nombre);
           acc.suma += a.score; acc.n += 1;

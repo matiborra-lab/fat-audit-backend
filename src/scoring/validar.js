@@ -1,63 +1,43 @@
 /**
- * Valida el motor de puntaje contra los numeros reales de la auditoria de
- * ejemplo del Excel (sucursal "nueva cordoba", hoja Dashboard): puntaje
- * total 0.8410598874 y resultado DESAPROBADA (el sector Cocina no alcanza
- * su umbral minimo del 80%, aunque el total de la auditoria haya dado
- * "verde"). No toca la base de datos - corre standalone:
+ * Valida el motor de puntaje simplificado (peso solo a nivel área, sector
+ * puramente de navegación) contra un caso sintético calculable a mano:
+ *
+ * Sectores: A, B (sin peso)
+ * Áreas: X (peso 60%), Y (peso 40%)
+ * Items:
+ *   1) sector A, área X, ESCALA_5, sin peso propio -> score 5 (valor 1.0)
+ *   2) sector B, área X, ESCALA_5, sin peso propio -> score 1 (valor 0.0)
+ *   3) sector A, área Y, SI_NO                     -> "SI"    (valor 1.0)
+ *
+ * Área X = equal split entre item 1 y 2 = (1.0 + 0.0) / 2 = 0.5
+ * Área Y = solo item 3 = 1.0
+ * Total  = 0.6*0.5 + 0.4*1.0 = 0.3 + 0.4 = 0.7  (AMARILLO, 60-79%)
+ *
+ * Sector A (item1 peso_efectivo=0.5 en X, item3 peso_efectivo=1.0 en Y,
+ *           unico item de Y) = (0.5*1.0 + 1.0*1.0) / (0.5+1.0) = 1.0
+ * Sector B (item2 peso_efectivo=0.5) = (0.5*0.0) / 0.5 = 0.0
+ *
+ * Umbral crítico: sector B >= 50% -> FALLA (0.0 < 0.5) -> DESAPROBADA,
+ * aunque el total (70%) sea "amarillo" y no rojo.
  *
  *   node src/scoring/validar.js
  */
 
 const { calcularPuntaje } = require('./index');
-const { ITEMS, SECTORES, AREAS, UMBRALES_CRITICOS } = require('../db/seed-data');
 
-// Puntuaciones (escala 1-5) tal como estan cargadas en la hoja "Ponderación"
-// del Excel, en el mismo orden que ITEMS.
-const SCORES = [
-  2, 5, 4, 4, 5, 5, 5, 4, 3, 5,
-  5, 4, 5, 5, 5, 5, 4, 2, 5, 3,
-  2, 2, 5, 5, 3, 5, 5, 5, 5, 5,
-  5, 5, 5, 3, 5, 5, 5, 5, 5, 5,
-  5, 5, 1, 5, 1, 1, 5, 1, 5, 5,
-  1, 5, 5, 5, 5, 5, 1, 5, 5, 1,
-  1, 5, 2, 5, 5, 2, 3, 5, 2, 5,
-  5, 5, 5, 5, 5, 5, 2, 5, 5, 5,
-  5, 5, 1, 1, 5, 3, 5, 3, 5, 2,
-  5, 5, 5, 1, 3, 5, 5, 5, 5, 5,
+const sectores = [{ id: 1, nombre: 'A' }, { id: 2, nombre: 'B' }];
+const areas = [{ id: 1, nombre: 'X', peso: 0.6 }, { id: 2, nombre: 'Y', peso: 0.4 }];
+const items = [
+  { id: 1, sector_id: 1, area_id: 1, tipo_respuesta: 'ESCALA_5', peso: null },
+  { id: 2, sector_id: 2, area_id: 1, tipo_respuesta: 'ESCALA_5', peso: null },
+  { id: 3, sector_id: 1, area_id: 2, tipo_respuesta: 'SI_NO', peso: null },
 ];
-
-if (SCORES.length !== ITEMS.length) {
-  throw new Error(`SCORES tiene ${SCORES.length} valores, ITEMS tiene ${ITEMS.length}`);
-}
-
-let idAuto = 1;
-const sectorIds = {};
-const sectores = SECTORES.map((s) => {
-  const id = idAuto++;
-  sectorIds[s.nombre] = id;
-  return { id, nombre: s.nombre, peso: s.peso };
-});
-const areaIds = {};
-const areas = AREAS.map((a) => {
-  const id = idAuto++;
-  areaIds[a.nombre] = id;
-  return { id, nombre: a.nombre, peso: a.peso };
-});
-const items = ITEMS.map(([sector, area, texto, peso, critico, informeInSitu], i) => ({
-  id: i + 1,
-  sector_id: sectorIds[sector],
-  area_id: areaIds[area],
-  texto,
-  tipo_respuesta: 'ESCALA_5',
-  peso,
-}));
-const respuestas = items.map((item, i) => ({ item_id: item.id, valor_json: SCORES[i], no_aplica: false }));
-const umbrales = UMBRALES_CRITICOS.map((u) => ({
-  tipo: u.tipo,
-  sector_id: u.tipo === 'SECTOR' ? sectorIds[u.sector] : null,
-  area_id: u.tipo === 'AREA' ? areaIds[u.area] : null,
-  porcentaje_minimo: u.porcentaje_minimo,
-}));
+const respuestas = [
+  { item_id: 1, valor_json: 5, no_aplica: false },
+  { item_id: 2, valor_json: 1, no_aplica: false },
+  { item_id: 3, valor_json: 'SI', no_aplica: false },
+];
+const umbrales = [{ tipo: 'SECTOR', sector_id: 2, porcentaje_minimo: 0.5 }];
 const semaforoConfig = [
   { rango_min: 0, rango_max: 49, etiqueta: 'Rojo' },
   { rango_min: 50, rango_max: 59, etiqueta: 'Naranja' },
@@ -68,23 +48,25 @@ const semaforoConfig = [
 
 const resultado = calcularPuntaje({ sectores, areas, items, respuestas, umbrales, semaforoConfig });
 
-const ESPERADO_PUNTAJE = 0.8410598874;
+const ESPERADO_PUNTAJE = 0.7;
 const ESPERADO_RESULTADO = 'DESAPROBADA';
+const ESPERADO_SEMAFORO = 'AMARILLO';
 
-console.log('Puntaje total calculado:', resultado.puntajeTotal);
-console.log('Puntaje total esperado: ', ESPERADO_PUNTAJE);
-console.log('Diferencia:', Math.abs(resultado.puntajeTotal - ESPERADO_PUNTAJE));
-console.log('Semáforo:', resultado.semaforo);
-console.log('Resultado:', resultado.resultado, '(esperado:', ESPERADO_RESULTADO + ')');
-console.log('Umbrales fallidos:', resultado.detalle.umbralesFallidos.map((u) => `${u.tipo} ${u.sector_id || u.area_id} -> ${(u.score * 100).toFixed(2)}% < ${(u.porcentaje_minimo * 100)}%`));
+console.log('Puntaje total:', resultado.puntajeTotal, '(esperado', ESPERADO_PUNTAJE + ')');
+console.log('Semáforo:', resultado.semaforo, '(esperado', ESPERADO_SEMAFORO + ')');
+console.log('Resultado:', resultado.resultado, '(esperado', ESPERADO_RESULTADO + ')');
+console.log('Áreas:', resultado.detalle.areas.map((a) => `${a.nombre}=${a.score}`));
+console.log('Sectores:', resultado.detalle.sectores.map((s) => `${s.nombre}=${s.score}`));
 
-const okPuntaje = Math.abs(resultado.puntajeTotal - ESPERADO_PUNTAJE) < 0.0001;
-const okResultado = resultado.resultado === ESPERADO_RESULTADO;
+const ok =
+  Math.abs(resultado.puntajeTotal - ESPERADO_PUNTAJE) < 1e-9 &&
+  resultado.resultado === ESPERADO_RESULTADO &&
+  resultado.semaforo === ESPERADO_SEMAFORO;
 
-if (okPuntaje && okResultado) {
-  console.log('\n✅ El motor de puntaje reproduce el Excel correctamente.');
+if (ok) {
+  console.log('\n✅ El motor de puntaje simplificado calcula correctamente.');
   process.exit(0);
 } else {
-  console.error('\n❌ El motor de puntaje NO coincide con el Excel.');
+  console.error('\n❌ El motor de puntaje NO coincide con lo esperado.');
   process.exit(1);
 }

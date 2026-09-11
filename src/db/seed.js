@@ -13,7 +13,8 @@
 
 require('dotenv').config();
 const bcrypt = require('bcryptjs');
-const { pool } = require('./index');
+const db = require('./index');
+const { pool } = db;
 const { SECTORES, AREAS, ITEMS, UMBRALES_CRITICOS, SEMAFORO } = require('./seed-data');
 
 const ADMIN_EMAIL = 'admin@fataudit.com.ar';
@@ -72,32 +73,23 @@ async function seedPlantilla(client, adminId) {
   );
   const templateId = tRows[0].id;
 
+  // Un solo INSERT multi-fila por nivel (ver db.bulkInsert) en vez de una
+  // query por fila, así los 100 ítems tardan un viaje de ida y vuelta en
+  // vez de ~100 secuenciales (relevante sobre todo contra una base remota
+  // como Railway).
+  const sectorRows = await db.bulkInsert(client, 'audit_sectores', ['template_id', 'nombre', 'orden'],
+    SECTORES.map((s, i) => [templateId, s.nombre, i]));
   const sectorIds = {};
-  for (const [i, s] of SECTORES.entries()) {
-    const { rows } = await client.query(
-      'INSERT INTO audit_sectores (template_id, nombre, orden, peso) VALUES ($1,$2,$3,$4) RETURNING id',
-      [templateId, s.nombre, i, s.peso]
-    );
-    sectorIds[s.nombre] = rows[0].id;
-  }
+  SECTORES.forEach((s, i) => { sectorIds[s.nombre] = sectorRows[i].id; });
 
+  const areaRows = await db.bulkInsert(client, 'audit_areas', ['template_id', 'nombre', 'orden', 'peso'],
+    AREAS.map((a, i) => [templateId, a.nombre, i, a.peso]));
   const areaIds = {};
-  for (const [i, a] of AREAS.entries()) {
-    const { rows } = await client.query(
-      'INSERT INTO audit_areas (template_id, nombre, orden, peso) VALUES ($1,$2,$3,$4) RETURNING id',
-      [templateId, a.nombre, i, a.peso]
-    );
-    areaIds[a.nombre] = rows[0].id;
-  }
+  AREAS.forEach((a, i) => { areaIds[a.nombre] = areaRows[i].id; });
 
-  let orden = 0;
-  for (const [sectorNombre, areaNombre, texto, peso, critico, informeInSitu] of ITEMS) {
-    await client.query(
-      `INSERT INTO audit_items (sector_id, area_id, texto, tipo_respuesta, peso, critico, informe_in_situ, permite_no_aplica, orden)
-       VALUES ($1,$2,$3,'ESCALA_5',$4,$5,$6,true,$7)`,
-      [sectorIds[sectorNombre], areaIds[areaNombre], texto, peso, critico, informeInSitu, orden++]
-    );
-  }
+  await db.bulkInsert(client, 'audit_items', ['sector_id', 'area_id', 'texto', 'tipo_respuesta', 'peso', 'critico', 'informe_in_situ', 'permite_no_aplica', 'orden'],
+    ITEMS.map(([sectorNombre, areaNombre, texto, peso, critico, informeInSitu], orden) =>
+      [sectorIds[sectorNombre], areaIds[areaNombre], texto, 'ESCALA_5', peso, critico, informeInSitu, true, orden]));
 
   for (const u of UMBRALES_CRITICOS) {
     if (u.tipo === 'SECTOR') {

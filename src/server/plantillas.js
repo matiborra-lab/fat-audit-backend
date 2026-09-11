@@ -21,6 +21,29 @@ function requireBuilder(req, res, next) {
   next();
 }
 
+// Tipos de respuesta que nunca puntuan - no participan del reparto de peso
+// de su area (ver TIPOS_PUNTUABLES mas abajo).
+const TIPOS_PUNTUABLES = ['SI_NO', 'CHECKBOX', 'ESCALA_5', 'ESCALA_10', 'OPCION_MULTIPLE'];
+
+// Regla de pesos (misma en dos niveles: areas de la plantilla, e items
+// puntuables dentro de cada area): o NINGUNO tiene peso (reparto igual), o
+// TODOS lo tienen y suman exactamente 100%. Devuelve un mensaje de error, o
+// null si esta bien. La tolerancia absorbe el redondeo de punto flotante al
+// convertir % con 1 decimal a fraccion (ej. 33.3% -> 0.333).
+function validarPesos(etiquetaGrupo, entidades) {
+  if (entidades.length === 0) return null;
+  const conPeso = entidades.filter((e) => e.peso != null);
+  if (conPeso.length === 0) return null;
+  if (conPeso.length !== entidades.length) {
+    return `${etiquetaGrupo}: si le ponés peso a una, tenés que ponerle peso a todas (o dejarlas todas sin peso para reparto igualitario)`;
+  }
+  const suma = entidades.reduce((acc, e) => acc + Number(e.peso), 0);
+  if (Math.abs(suma - 1) > 0.0005) {
+    return `${etiquetaGrupo}: los pesos suman ${(suma * 100).toFixed(1)}%, tienen que sumar exactamente 100%`;
+  }
+  return null;
+}
+
 async function cargarEstructura(templateId) {
   const [sectores, areas, items, umbrales, sucursales] = await Promise.all([
     db.query('SELECT * FROM audit_sectores WHERE template_id = $1 ORDER BY orden', [templateId]),
@@ -111,11 +134,20 @@ function registrarRutasPlantillas(app) {
   });
 
   // Reemplaza sectores/areas/items/reglas/umbrales enteros. Body:
-  // { sectores: [{nombre,orden,peso}], areas: [{nombre,orden,peso}],
+  // { sectores: [{nombre,orden}], areas: [{nombre,orden,peso}],
   //   items: [{sector, area, texto, ...campos, reglas:[{condicion,acciones}]}] (sector/area = nombre, se resuelven a id),
   //   umbrales: [{tipo, sector|area (nombre), porcentaje_minimo}] }
   app.put('/api/plantillas/:id/estructura', requireBuilder, async (req, res) => {
     const { sectores = [], areas = [], items = [], umbrales = [] } = req.body;
+
+    const errorAreas = validarPesos('Las áreas', areas);
+    if (errorAreas) return res.status(400).json({ error: errorAreas });
+    for (const area of areas) {
+      const itemsDelArea = items.filter((it) => it.area === area.nombre && TIPOS_PUNTUABLES.includes(it.tipo_respuesta || 'ESCALA_5'));
+      const errorItems = validarPesos(`Los ítems puntuables del área "${area.nombre}"`, itemsDelArea);
+      if (errorItems) return res.status(400).json({ error: errorItems });
+    }
+
     const client = await db.pool.connect();
     try {
       await client.query('BEGIN');
@@ -127,50 +159,47 @@ function registrarRutasPlantillas(app) {
       await client.query('DELETE FROM audit_areas WHERE template_id = $1', [req.params.id]);
       await client.query('DELETE FROM umbrales_criticos WHERE template_id = $1', [req.params.id]);
 
+      // Cada nivel se inserta con UN solo INSERT multi-fila (ver
+      // db.bulkInsert) en vez de una query por fila - una plantilla de 100
+      // ítems hace ~5 viajes de ida y vuelta en total en vez de ~150. El
+      // orden de las filas devueltas siempre coincide con el orden de
+      // entrada (ver el comentario en bulkInsert).
+      const sectorRows = await db.bulkInsert(client, 'audit_sectores', ['template_id', 'nombre', 'orden'],
+        sectores.map((s, i) => [req.params.id, s.nombre, s.orden ?? i]));
       const sectorIds = {};
-      for (const [i, s] of sectores.entries()) {
-        const { rows } = await client.query(
-          'INSERT INTO audit_sectores (template_id, nombre, orden, peso) VALUES ($1,$2,$3,$4) RETURNING id',
-          [req.params.id, s.nombre, s.orden ?? i, s.peso ?? null]
-        );
-        sectorIds[s.nombre] = rows[0].id;
-      }
+      sectores.forEach((s, i) => { sectorIds[s.nombre] = sectorRows[i].id; });
+
+      const areaRows = await db.bulkInsert(client, 'audit_areas', ['template_id', 'nombre', 'orden', 'peso'],
+        areas.map((a, i) => [req.params.id, a.nombre, a.orden ?? i, a.peso ?? null]));
       const areaIds = {};
-      for (const [i, a] of areas.entries()) {
-        const { rows } = await client.query(
-          'INSERT INTO audit_areas (template_id, nombre, orden, peso) VALUES ($1,$2,$3,$4) RETURNING id',
-          [req.params.id, a.nombre, a.orden ?? i, a.peso ?? null]
-        );
-        areaIds[a.nombre] = rows[0].id;
-      }
-      for (const [i, it] of items.entries()) {
+      areas.forEach((a, i) => { areaIds[a.nombre] = areaRows[i].id; });
+
+      for (const it of items) {
         if (!sectorIds[it.sector] || !areaIds[it.area]) {
           throw Object.assign(new Error(`Ítem "${it.texto}": el sector o área indicado no existe en esta plantilla`), { status: 400 });
         }
-        const { rows: itemRows } = await client.query(
-          `INSERT INTO audit_items (sector_id, area_id, texto, ayuda_texto, tipo_respuesta, opciones_json, peso, critico, informe_in_situ, evidencia_requerida, permite_no_aplica, orden)
-           VALUES ($1,$2,$3,$4,COALESCE($5,'ESCALA_5'),$6,$7,COALESCE($8,false),COALESCE($9,false),COALESCE($10,'NINGUNA'),COALESCE($11,false),$12) RETURNING id`,
-          [sectorIds[it.sector], areaIds[it.area], it.texto, it.ayuda_texto || null, it.tipo_respuesta,
-            it.opciones_json ? JSON.stringify(it.opciones_json) : null, it.peso ?? null, it.critico, it.informe_in_situ,
-            it.evidencia_requerida, it.permite_no_aplica, it.orden ?? i]
-        );
-        const itemId = itemRows[0].id;
-        for (const regla of it.reglas || []) {
-          await client.query(
-            'INSERT INTO item_reglas (item_id, condicion_json, acciones_json) VALUES ($1,$2,$3)',
-            [itemId, JSON.stringify(regla.condicion), JSON.stringify(regla.acciones)]
-          );
-        }
       }
+      const itemRows = await db.bulkInsert(client, 'audit_items',
+        ['sector_id', 'area_id', 'texto', 'ayuda_texto', 'tipo_respuesta', 'opciones_json', 'peso', 'critico', 'informe_in_situ', 'evidencia_requerida', 'permite_no_aplica', 'orden'],
+        items.map((it, i) => {
+          const tipo = it.tipo_respuesta || 'ESCALA_5';
+          return [
+            sectorIds[it.sector], areaIds[it.area], it.texto, it.ayuda_texto || null, tipo,
+            it.opciones_json ? JSON.stringify(it.opciones_json) : null,
+            TIPOS_PUNTUABLES.includes(tipo) ? (it.peso ?? null) : null, // TEXTO/FECHA/NUMERO nunca guardan peso
+            !!it.critico, !!it.informe_in_situ, it.evidencia_requerida || 'NINGUNA', !!it.permite_no_aplica, it.orden ?? i,
+          ];
+        }));
+      const itemIds = itemRows.map((r) => r.id);
+      const reglasFilas = items.flatMap((it, i) => (it.reglas || []).map((regla) => [itemIds[i], JSON.stringify(regla.condicion), JSON.stringify(regla.acciones)]));
+      await db.bulkInsert(client, 'item_reglas', ['item_id', 'condicion_json', 'acciones_json'], reglasFilas);
+
       for (const u of umbrales) {
-        if (u.tipo === 'SECTOR') {
-          if (!sectorIds[u.sector]) throw Object.assign(new Error(`Umbral crítico: el sector "${u.sector}" no existe`), { status: 400 });
-          await client.query('INSERT INTO umbrales_criticos (template_id, tipo, sector_id, porcentaje_minimo) VALUES ($1,\'SECTOR\',$2,$3)', [req.params.id, sectorIds[u.sector], u.porcentaje_minimo]);
-        } else {
-          if (!areaIds[u.area]) throw Object.assign(new Error(`Umbral crítico: el área "${u.area}" no existe`), { status: 400 });
-          await client.query('INSERT INTO umbrales_criticos (template_id, tipo, area_id, porcentaje_minimo) VALUES ($1,\'AREA\',$2,$3)', [req.params.id, areaIds[u.area], u.porcentaje_minimo]);
-        }
+        if (u.tipo === 'SECTOR' && !sectorIds[u.sector]) throw Object.assign(new Error(`Umbral crítico: el sector "${u.sector}" no existe`), { status: 400 });
+        if (u.tipo === 'AREA' && !areaIds[u.area]) throw Object.assign(new Error(`Umbral crítico: el área "${u.area}" no existe`), { status: 400 });
       }
+      await db.bulkInsert(client, 'umbrales_criticos', ['template_id', 'tipo', 'sector_id', 'area_id', 'porcentaje_minimo'],
+        umbrales.map((u) => [req.params.id, u.tipo, u.tipo === 'SECTOR' ? sectorIds[u.sector] : null, u.tipo === 'AREA' ? areaIds[u.area] : null, u.porcentaje_minimo]));
       await client.query('UPDATE audit_templates SET actualizado_en = now() WHERE id = $1', [req.params.id]);
       await client.query('COMMIT');
       const estructura = await cargarEstructura(req.params.id);
@@ -228,37 +257,35 @@ function registrarRutasPlantillas(app) {
       );
       const nueva = nuevaRows[0];
 
+      // Igual que en PUT /estructura: se pipelinean las queries con
+      // bulkInsert (ver db/index.js): un solo INSERT multi-fila por nivel
+      // en vez de una query por fila, para no hacer ~150 viajes de ida y
+      // vuelta secuenciales al copiar una plantilla grande.
       const estructura = await cargarEstructura(origen.id);
+
+      const sectorRows = await db.bulkInsert(client, 'audit_sectores', ['template_id', 'nombre', 'orden'],
+        estructura.sectores.map((s) => [nueva.id, s.nombre, s.orden]));
       const sectorIds = {};
-      for (const s of estructura.sectores) {
-        const { rows } = await client.query('INSERT INTO audit_sectores (template_id, nombre, orden, peso) VALUES ($1,$2,$3,$4) RETURNING id', [nueva.id, s.nombre, s.orden, s.peso]);
-        sectorIds[s.id] = rows[0].id;
-      }
+      estructura.sectores.forEach((s, i) => { sectorIds[s.id] = sectorRows[i].id; });
+
+      const areaRows = await db.bulkInsert(client, 'audit_areas', ['template_id', 'nombre', 'orden', 'peso'],
+        estructura.areas.map((a) => [nueva.id, a.nombre, a.orden, a.peso]));
       const areaIds = {};
-      for (const a of estructura.areas) {
-        const { rows } = await client.query('INSERT INTO audit_areas (template_id, nombre, orden, peso) VALUES ($1,$2,$3,$4) RETURNING id', [nueva.id, a.nombre, a.orden, a.peso]);
-        areaIds[a.id] = rows[0].id;
-      }
-      for (const it of estructura.items) {
-        const { rows: itemRows } = await client.query(
-          `INSERT INTO audit_items (sector_id, area_id, texto, ayuda_texto, tipo_respuesta, opciones_json, peso, critico, informe_in_situ, evidencia_requerida, permite_no_aplica, orden)
-           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING id`,
-          [sectorIds[it.sector_id], areaIds[it.area_id], it.texto, it.ayuda_texto, it.tipo_respuesta, it.opciones_json, it.peso, it.critico, it.informe_in_situ, it.evidencia_requerida, it.permite_no_aplica, it.orden]
-        );
-        for (const regla of it.reglas) {
-          await client.query('INSERT INTO item_reglas (item_id, condicion_json, acciones_json) VALUES ($1,$2,$3)', [itemRows[0].id, regla.condicion_json, regla.acciones_json]);
-        }
-      }
-      for (const u of estructura.umbrales) {
-        await client.query(
-          'INSERT INTO umbrales_criticos (template_id, tipo, sector_id, area_id, porcentaje_minimo) VALUES ($1,$2,$3,$4,$5)',
-          [nueva.id, u.tipo, u.sector_id ? sectorIds[u.sector_id] : null, u.area_id ? areaIds[u.area_id] : null, u.porcentaje_minimo]
-        );
-      }
+      estructura.areas.forEach((a, i) => { areaIds[a.id] = areaRows[i].id; });
+
+      const itemRows = await db.bulkInsert(client, 'audit_items',
+        ['sector_id', 'area_id', 'texto', 'ayuda_texto', 'tipo_respuesta', 'opciones_json', 'peso', 'critico', 'informe_in_situ', 'evidencia_requerida', 'permite_no_aplica', 'orden'],
+        estructura.items.map((it) => [sectorIds[it.sector_id], areaIds[it.area_id], it.texto, it.ayuda_texto, it.tipo_respuesta, it.opciones_json, it.peso, it.critico, it.informe_in_situ, it.evidencia_requerida, it.permite_no_aplica, it.orden]));
+      const itemIds = itemRows.map((r) => r.id);
+      const reglasFilas = estructura.items.flatMap((it, i) => (it.reglas || []).map((regla) => [itemIds[i], regla.condicion_json, regla.acciones_json]));
+      await db.bulkInsert(client, 'item_reglas', ['item_id', 'condicion_json', 'acciones_json'], reglasFilas);
+
+      await db.bulkInsert(client, 'umbrales_criticos', ['template_id', 'tipo', 'sector_id', 'area_id', 'porcentaje_minimo'],
+        estructura.umbrales.map((u) => [nueva.id, u.tipo, u.sector_id ? sectorIds[u.sector_id] : null, u.area_id ? areaIds[u.area_id] : null, u.porcentaje_minimo]));
+
       if (!origen.aplica_todas_sucursales) {
-        for (const sucursalId of estructura.sucursal_ids) {
-          await client.query('INSERT INTO template_sucursales (template_id, sucursal_id) VALUES ($1,$2)', [nueva.id, sucursalId]);
-        }
+        await db.bulkInsert(client, 'template_sucursales', ['template_id', 'sucursal_id'],
+          estructura.sucursal_ids.map((sucursalId) => [nueva.id, sucursalId]));
       }
       await client.query('COMMIT');
       res.status(201).json(nueva);

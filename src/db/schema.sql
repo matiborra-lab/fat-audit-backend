@@ -79,17 +79,22 @@ CREATE TABLE template_sucursales (
 
 -- Agrupador de recorrido fisico (Cocina, Deposito, etc.) - es el "sector"
 -- del Excel original y tambien la seccion que el auditor completa paso a
--- paso en el celular (ver ejecucion movil).
+-- paso en el celular (ver ejecucion movil). Puramente de navegacion/
+-- agrupamiento - NO pondera en el calculo del puntaje (eso lo hace el area,
+-- ver audit_areas.peso). Igual sirve para umbrales criticos por sector
+-- (ver umbrales_criticos), que se calculan como ratio directo, sin peso.
 CREATE TABLE audit_sectores (
   id           SERIAL PRIMARY KEY,
   template_id  INTEGER NOT NULL REFERENCES audit_templates(id) ON DELETE CASCADE,
   nombre       TEXT NOT NULL,
-  orden        INTEGER NOT NULL DEFAULT 0,
-  peso         NUMERIC(6,4)              -- NULL = sin peso explicito (reparto igual entre sectores sin peso)
+  orden        INTEGER NOT NULL DEFAULT 0
 );
 
 -- Dimension transversal (Bromatologia, Marca, etc.) - se audita dentro de
 -- varios sectores a la vez; cada item pertenece a un sector Y a un area.
+-- Unica unidad de peso a nivel plantilla: si ninguna area tiene peso,
+-- reparto igualitario; si alguna lo tiene, TODAS deben tenerlo y sumar
+-- exactamente 100% (ver validarPesos en server/plantillas.js).
 CREATE TABLE audit_areas (
   id           SERIAL PRIMARY KEY,
   template_id  INTEGER NOT NULL REFERENCES audit_templates(id) ON DELETE CASCADE,
@@ -107,7 +112,9 @@ CREATE TABLE audit_items (
   tipo_respuesta       TEXT NOT NULL DEFAULT 'ESCALA_5'
     CHECK (tipo_respuesta IN ('SI_NO', 'CHECKBOX', 'ESCALA_5', 'ESCALA_10', 'OPCION_MULTIPLE', 'NUMERO', 'TEXTO', 'FECHA')),
   opciones_json        JSONB,                   -- solo OPCION_MULTIPLE: [{etiqueta, valor}], valor en 0..1
-  peso                 NUMERIC(6,4),             -- NULL = reparto igual entre los items sin peso de su area+sector
+  peso                 NUMERIC(6,4),             -- solo tiene sentido si tipo_respuesta puntua (no TEXTO/FECHA/NUMERO).
+                                                  -- NULL en TODOS los items puntuables de su area = reparto igual;
+                                                  -- si alguno lo tiene, TODOS deben tenerlo y sumar 100% dentro del area
   critico              BOOLEAN NOT NULL DEFAULT false,   -- marcador informativo (comprobante + resumen de criticos)
   informe_in_situ      BOOLEAN NOT NULL DEFAULT false,   -- debe figurar en el comprobante de visita
   evidencia_requerida  TEXT NOT NULL DEFAULT 'NINGUNA' CHECK (evidencia_requerida IN ('NINGUNA', 'FOTO', 'VIDEO', 'FOTO_O_VIDEO')),
