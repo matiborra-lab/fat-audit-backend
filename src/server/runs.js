@@ -16,9 +16,13 @@ const { urlDeSubida } = require('../storage');
 const { generarPdfAuditoria } = require('../pdf');
 const { enviarMail } = require('../mailer');
 const { calcularPuntaje } = require('../scoring');
+const { crearNotificacion } = require('./notificaciones');
 
 async function obtenerRunOForbidden(req, res) {
-  const { rows } = await db.query('SELECT * FROM audit_runs WHERE id = $1', [req.params.id]);
+  const { rows } = await db.query(
+    'SELECT r.*, s.nombre AS sucursal_nombre FROM audit_runs r JOIN sucursales s ON s.id = r.sucursal_id WHERE r.id = $1',
+    [req.params.id]
+  );
   const run = rows[0];
   if (!run) { res.status(404).json({ error: 'Auditoría no encontrada' }); return null; }
   if (!puedeAccederSucursal(req.usuario, run.sucursal_id)) { res.status(403).json({ error: 'No tenés acceso a esta sucursal' }); return null; }
@@ -113,6 +117,41 @@ async function crearRun({ templateId, sucursalId, tipo, rol, auditorUserId, resp
     [templateId, JSON.stringify(estructura), sucursalId, tipoFinal, auditorUserId, responsableNombre || null]
   );
   return rows[0];
+}
+
+// Arma el snapshot de un seguimiento a partir de los hallazgos elegidos de
+// una auditoria de marca ya completada: solo esos items (y los sectores/
+// areas a los que pertenecen) - sin duplicar toda la estructura original.
+// El seguimiento no vuelve a evaluar aprobado/desaprobado por umbral, solo
+// corrige puntos puntuales.
+function construirSnapshotSeguimiento(origen, itemIds) {
+  const itemsSeleccionados = origen.items.filter((i) => itemIds.includes(i.id));
+  const sectorIdsUsados = new Set(itemsSeleccionados.map((i) => i.sector_id));
+  const areaIdsUsados = new Set(itemsSeleccionados.map((i) => i.area_id));
+  return {
+    sectores: origen.sectores.filter((s) => sectorIdsUsados.has(s.id)),
+    areas: origen.areas.filter((a) => areaIdsUsados.has(a.id)),
+    items: itemsSeleccionados,
+    umbrales: [],
+    puntaje_minimo_aprobacion: null,
+  };
+}
+
+// Crea el audit_run de un seguimiento ya PROGRAMADO desde el calendario (ver
+// /api/calendario/:id/iniciar) - a diferencia de crearRun, no lee una
+// plantilla viva: arma el snapshot a partir de la auditoria de marca de
+// origen y los items que se eligieron al programarlo.
+async function crearRunDesdeHallazgos({ origenRunId, itemIds, sucursalId, auditorUserId, responsableNombre }) {
+  const { rows } = await db.query('SELECT * FROM audit_runs WHERE id = $1', [origenRunId]);
+  const origen = rows[0];
+  if (!origen) throw Object.assign(new Error('No se encontró la auditoría de marca de origen'), { status: 400 });
+  const snapshot = construirSnapshotSeguimiento(origen.estructura_snapshot, itemIds || []);
+  const { rows: creado } = await db.query(
+    `INSERT INTO audit_runs (template_id, estructura_snapshot, sucursal_id, tipo, auditor_user_id, responsable_nombre, origen_run_id)
+     VALUES ($1,$2,$3,'SEGUIMIENTO',$4,$5,$6) RETURNING *`,
+    [origen.template_id, JSON.stringify(snapshot), sucursalId, auditorUserId, responsableNombre || null, origen.id]
+  );
+  return creado[0];
 }
 
 module.exports = function registrarRutasRuns(app) {
@@ -338,33 +377,39 @@ module.exports = function registrarRutasRuns(app) {
     }
   });
 
-  // Crea una auditoria de seguimiento a partir de los hallazgos elegidos de
-  // una ya completada - el snapshot nuevo solo incluye esos items (y los
-  // sectores/areas a los que pertenecen), sin duplicar toda la auditoria.
+  // Programa una auditoria de seguimiento a partir de los hallazgos
+  // elegidos de una auditoria de MARCA ya completada - no la ejecuta al
+  // toque: crea un evento de calendario (PENDIENTE) para una fecha/hora y
+  // responsable concretos, que se inicia mas adelante desde el calendario
+  // (ver /api/calendario/:id/iniciar y crearRunDesdeHallazgos). El
+  // responsable recibe una notificacion ahora y un recordatorio el dia de
+  // la fecha programada (ver src/recordatorios).
   app.post('/api/runs/:id/seguimiento', async (req, res) => {
+    if (req.usuario.rol !== 'ADMIN' && req.usuario.rol !== 'AUDITOR') {
+      return res.status(403).json({ error: 'Solo administrador o auditor pueden generar un seguimiento' });
+    }
     const run = await obtenerRunOForbidden(req, res);
     if (!run) return;
-    if (run.estado !== 'COMPLETADA') return res.status(400).json({ error: 'Solo se puede crear un seguimiento de una auditoría completada' });
-    const { item_ids = [], responsable_nombre } = req.body;
+    if (run.estado !== 'COMPLETADA') return res.status(400).json({ error: 'Solo se puede generar un seguimiento de una auditoría completada' });
+    if (run.tipo !== 'MARCA') return res.status(400).json({ error: 'El seguimiento se genera solo a partir de una auditoría de marca' });
+    const { item_ids = [], responsable_user_id, fecha_hora, notificar = true } = req.body;
     if (item_ids.length === 0) return res.status(400).json({ error: 'Elegí al menos un hallazgo para el seguimiento' });
+    if (!responsable_user_id || !fecha_hora) return res.status(400).json({ error: 'Faltan campos: responsable_user_id, fecha_hora' });
     try {
-      const origen = run.estructura_snapshot;
-      const itemsSeleccionados = origen.items.filter((i) => item_ids.includes(i.id));
-      const sectorIdsUsados = new Set(itemsSeleccionados.map((i) => i.sector_id));
-      const areaIdsUsados = new Set(itemsSeleccionados.map((i) => i.area_id));
-      const snapshotSeguimiento = {
-        sectores: origen.sectores.filter((s) => sectorIdsUsados.has(s.id)),
-        areas: origen.areas.filter((a) => areaIdsUsados.has(a.id)),
-        items: itemsSeleccionados,
-        umbrales: [], // el seguimiento no vuelve a evaluar aprobado/desaprobado por umbral, solo corrige puntos
-        sucursal_ids: origen.sucursal_ids,
-      };
+      const { rows: plantillaRows } = await db.query('SELECT nombre FROM audit_templates WHERE id = $1', [run.template_id]);
+      const tituloBase = plantillaRows[0]?.nombre || 'Auditoría';
       const { rows } = await db.query(
-        `INSERT INTO audit_runs (template_id, estructura_snapshot, sucursal_id, tipo, auditor_user_id, responsable_nombre, origen_run_id)
-         VALUES ($1,$2,$3,'SEGUIMIENTO',$4,$5,$6) RETURNING *`,
-        [run.template_id, JSON.stringify(snapshotSeguimiento), run.sucursal_id, req.usuario.usuarioId, responsable_nombre || run.responsable_nombre, run.id]
+        `INSERT INTO schedule_events (sucursal_id, tipo, template_id, titulo, responsable_user_id, fecha_hora, origen_run_id, items_seleccionados, creado_por)
+         VALUES ($1,'SEGUIMIENTO',$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [run.sucursal_id, run.template_id, `Seguimiento — ${tituloBase}`, responsable_user_id, fecha_hora, run.id, item_ids, req.usuario.usuarioId]
       );
-      res.status(201).json(rows[0]);
+      const evento = rows[0];
+      if (notificar) {
+        await crearNotificacion(responsable_user_id, 'ASIGNACION', 'Seguimiento asignado',
+          `Se te asignó un seguimiento para el ${new Date(fecha_hora).toLocaleString('es-AR')}.`,
+          { evento_id: evento.id, sucursal_id: run.sucursal_id });
+      }
+      res.status(201).json(evento);
     } catch (err) {
       res.status(400).json({ error: err.message });
     }
@@ -372,3 +417,4 @@ module.exports = function registrarRutasRuns(app) {
 };
 
 module.exports.crearRun = crearRun;
+module.exports.crearRunDesdeHallazgos = crearRunDesdeHallazgos;

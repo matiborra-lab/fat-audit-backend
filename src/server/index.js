@@ -490,6 +490,9 @@ reportes(app);
 const { iniciarScheduler } = require('../reportes');
 iniciarScheduler();
 
+const { iniciarSchedulerRecordatorios } = require('../recordatorios');
+iniciarSchedulerRecordatorios();
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FAT Audit backend escuchando en :${PORT}`));
 

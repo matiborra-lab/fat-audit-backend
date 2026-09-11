@@ -271,6 +271,11 @@ CREATE TABLE schedule_events (
   solicitud_revision_motivo  TEXT,            -- solo TURNO: "no puedo asistir" del colaborador asignado
   solicitud_revision_en      TIMESTAMPTZ,
   solicitud_revision_estado  TEXT CHECK (solicitud_revision_estado IN ('PENDIENTE', 'RESUELTA')),
+  origen_run_id         INTEGER REFERENCES audit_runs(id) ON DELETE SET NULL, -- solo SEGUIMIENTO generado desde los
+                                              -- hallazgos de una auditoria de marca ya completada (ver runs.js)
+  items_seleccionados   INTEGER[],           -- idem: ids de item DENTRO del snapshot de origen_run_id a incluir
+  recordatorio_enviado_en TIMESTAMPTZ,        -- recordatorio del dia de realizacion (ver src/recordatorios) -
+                                              -- evita mandarlo mas de una vez por evento
   creado_por            INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
   creado_en             TIMESTAMPTZ NOT NULL DEFAULT now()
 );

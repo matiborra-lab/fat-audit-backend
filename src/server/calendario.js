@@ -15,7 +15,7 @@
 const db = require('../db');
 const { puedeAccederSucursal, scopeSucursal } = require('../auth/middleware');
 const { urlDeSubida } = require('../storage');
-const { crearRun } = require('./runs');
+const { crearRun, crearRunDesdeHallazgos } = require('./runs');
 const { crearNotificacion, crearNotificaciones } = require('./notificaciones');
 
 const MAX_OCURRENCIAS = 200; // limite de seguridad para no crear series gigantes por error
@@ -288,16 +288,27 @@ module.exports = function registrarRutasCalendario(app) {
     const evento = await obtenerEventoOForbidden(req, res);
     if (!evento) return;
     if (evento.tipo === 'TAREA') return res.status(400).json({ error: 'Este evento es una tarea, no una auditoría - usá /completar' });
-    if (!evento.template_id) return res.status(400).json({ error: 'El evento no tiene una plantilla asociada' });
     try {
-      // tipo 'AUDITORIA' (evento de calendario) no es un audit_runs.tipo
-      // valido - se omite para que crearRun use el tipo propio de la
-      // plantilla (MARCA/INTERNA). 'SEGUIMIENTO' sí es valido en ambos.
-      const run = await crearRun({
-        templateId: evento.template_id, sucursalId: evento.sucursal_id,
-        tipo: evento.tipo === 'SEGUIMIENTO' ? 'SEGUIMIENTO' : undefined,
-        rol: req.usuario.rol, auditorUserId: req.usuario.usuarioId, responsableNombre: null,
-      });
+      let run;
+      if (evento.tipo === 'SEGUIMIENTO' && evento.origen_run_id) {
+        // Seguimiento programado a partir de los hallazgos de una auditoria
+        // de marca (ver POST /api/runs/:id/seguimiento) - el snapshot sale
+        // de esa auditoria de origen, no de una plantilla viva.
+        run = await crearRunDesdeHallazgos({
+          origenRunId: evento.origen_run_id, itemIds: evento.items_seleccionados,
+          sucursalId: evento.sucursal_id, auditorUserId: req.usuario.usuarioId, responsableNombre: null,
+        });
+      } else {
+        if (!evento.template_id) return res.status(400).json({ error: 'El evento no tiene una plantilla asociada' });
+        // tipo 'AUDITORIA' (evento de calendario) no es un audit_runs.tipo
+        // valido - se omite para que crearRun use el tipo propio de la
+        // plantilla (MARCA/INTERNA). 'SEGUIMIENTO' sí es valido en ambos.
+        run = await crearRun({
+          templateId: evento.template_id, sucursalId: evento.sucursal_id,
+          tipo: evento.tipo === 'SEGUIMIENTO' ? 'SEGUIMIENTO' : undefined,
+          rol: req.usuario.rol, auditorUserId: req.usuario.usuarioId, responsableNombre: null,
+        });
+      }
       await db.query(`UPDATE schedule_events SET estado = 'COMPLETADA', run_id = $1 WHERE id = $2`, [run.id, req.params.id]);
       res.status(201).json(run);
     } catch (err) {
