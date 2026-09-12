@@ -288,6 +288,39 @@ CREATE INDEX idx_schedule_events_sucursal_fecha ON schedule_events (sucursal_id,
 CREATE INDEX idx_schedule_events_serie ON schedule_events (serie_id);
 CREATE INDEX idx_schedule_events_responsable ON schedule_events (responsable_user_id);
 
+-- Catalogo de tareas rutinarias (tipo -> tareas), administrable por Admin en
+-- Configuracion - una TAREA del calendario puede salir de este catalogo
+-- (tarea_catalogo_id) o ser libre ("Otro", con titulo/descripcion propios).
+CREATE TABLE tipos_tarea (
+  id       SERIAL PRIMARY KEY,
+  nombre   TEXT NOT NULL,
+  orden    INTEGER NOT NULL DEFAULT 0,
+  activo   BOOLEAN NOT NULL DEFAULT true,
+  creado_en TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE TABLE tareas_catalogo (
+  id                       SERIAL PRIMARY KEY,
+  tipo_tarea_id            INTEGER NOT NULL REFERENCES tipos_tarea(id) ON DELETE CASCADE,
+  nombre                   TEXT NOT NULL,
+  orden                    INTEGER NOT NULL DEFAULT 0,
+  activo                   BOOLEAN NOT NULL DEFAULT true,
+  aplica_todas_sucursales  BOOLEAN NOT NULL DEFAULT true,
+  foto_requerida           BOOLEAN NOT NULL DEFAULT false, -- exige evidencia fotografica (solo camara) al completarla
+  creado_en                TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_tareas_catalogo_tipo ON tareas_catalogo (tipo_tarea_id);
+-- Solo se usa cuando aplica_todas_sucursales = false (mismo patron que template_sucursales).
+CREATE TABLE tarea_sucursales (
+  tarea_id     INTEGER NOT NULL REFERENCES tareas_catalogo(id) ON DELETE CASCADE,
+  sucursal_id  INTEGER NOT NULL REFERENCES sucursales(id) ON DELETE CASCADE,
+  PRIMARY KEY (tarea_id, sucursal_id)
+);
+
+ALTER TABLE schedule_events
+  ADD COLUMN tarea_catalogo_id     INTEGER REFERENCES tareas_catalogo(id) ON DELETE SET NULL,
+  ADD COLUMN evidencia_obligatoria BOOLEAN NOT NULL DEFAULT false, -- copiado de tareas_catalogo.foto_requerida (o tildado a mano si es "Otro")
+  ADD COLUMN hora_definida         BOOLEAN NOT NULL DEFAULT true;  -- false = tarea "solo ese dia", sin horario puntual (ver panel Tareas)
+
 -- Notificaciones in-app - base de datos compartida con Web Push (etapa
 -- posterior): cada trigger (turnos publicados, solicitud de revision,
 -- asignacion) inserta aca: mas adelante, el mismo insert tambien dispara el

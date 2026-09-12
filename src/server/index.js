@@ -486,12 +486,14 @@ const historial = require('./historial');
 const calendario = require('./calendario');
 const notificaciones = require('./notificaciones');
 const reportes = require('./reportes');
+const tareas = require('./tareas');
 plantillas(app);
 runs(app);
 historial(app);
 calendario(app);
 notificaciones(app);
 reportes(app);
+tareas(app);
 
 const { iniciarScheduler } = require('../reportes');
 iniciarScheduler();

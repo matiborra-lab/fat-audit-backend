@@ -112,6 +112,44 @@ function diaSemanaDeFecha(fechaISO) {
   return new Date(`${fechaISO}T00:00:00`).getDay();
 }
 
+// Recurrencia de una TAREA (a diferencia de los turnos, acá la hora la elige
+// libremente quien programa - no depende de sucursal_horarios_turno). Si no
+// se pasa horaHHMM, cada ocurrencia queda al inicio del día (00:00) y el
+// caller marca hora_definida = false (ver POST /api/calendario/tareas/programar).
+function generarFechasTareaPorDiaSemana(fechaDesde, fechaHasta, diasSemana, horaHHMM) {
+  const desde = new Date(`${fechaDesde}T00:00:00`);
+  const hasta = fechaHasta ? new Date(`${fechaHasta}T23:59:59`) : new Date(desde.getTime() + DIAS_VENTANA_SIN_FIN * 86400000);
+  const set = new Set(diasSemana.map(Number));
+  const [h, m] = horaHHMM ? horaHHMM.split(':').map(Number) : [0, 0];
+  const fechas = [];
+  const cursor = new Date(desde);
+  while (cursor <= hasta && fechas.length < MAX_OCURRENCIAS) {
+    if (set.has(cursor.getDay())) fechas.push(new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate(), h, m));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return fechas;
+}
+
+// Un día-del-mes que no existe en un mes dado (ej. 31 en febrero) simplemente
+// no genera ocurrencia ese mes - no se corre al mes siguiente.
+function generarFechasTareaPorDiaDelMes(fechaDesde, fechaHasta, diasMes, horaHHMM) {
+  const desde = new Date(`${fechaDesde}T00:00:00`);
+  const hasta = fechaHasta ? new Date(`${fechaHasta}T23:59:59`) : new Date(desde.getTime() + DIAS_VENTANA_SIN_FIN * 86400000);
+  const [h, m] = horaHHMM ? horaHHMM.split(':').map(Number) : [0, 0];
+  const fechas = [];
+  const cursorMes = new Date(desde.getFullYear(), desde.getMonth(), 1);
+  while (cursorMes <= hasta && fechas.length < MAX_OCURRENCIAS) {
+    for (const dia of diasMes) {
+      const candidata = new Date(cursorMes.getFullYear(), cursorMes.getMonth(), dia, h, m);
+      if (candidata.getMonth() !== cursorMes.getMonth()) continue; // desbordó (ej. 31 en un mes de 30)
+      if (candidata >= desde && candidata <= hasta) fechas.push(candidata);
+    }
+    cursorMes.setMonth(cursorMes.getMonth() + 1);
+  }
+  fechas.sort((a, b) => a - b);
+  return fechas;
+}
+
 // fechaBase (Date, solo se usan año/mes/día) + horario {desde,hasta} (HH:MM)
 // -> { inicio, duracionMinutos }. hasta <= desde se interpreta como que el
 // turno cruza la medianoche.
@@ -176,10 +214,11 @@ module.exports = function registrarRutasCalendario(app) {
     }
   });
 
-  // Body: { sucursal_id, tipo, template_id (AUDITORIA), titulo, descripcion,
-  // responsable_user_id, fecha_hora, duracion_minutos, recurrencia }
+  // Body: { sucursal_id, tipo, template_id (AUDITORIA), tarea_catalogo_id (TAREA),
+  // foto_requerida (TAREA "Otro"), titulo, descripcion, responsable_user_id,
+  // fecha_hora, duracion_minutos, recurrencia }
   app.post('/api/calendario', async (req, res) => {
-    const { sucursal_id, tipo, template_id, titulo, descripcion, responsable_user_id, fecha_hora, duracion_minutos, recurrencia } = req.body;
+    const { sucursal_id, tipo, template_id, tarea_catalogo_id, foto_requerida, titulo, descripcion, responsable_user_id, fecha_hora, duracion_minutos, recurrencia } = req.body;
     if (!sucursal_id || !tipo || !fecha_hora) return res.status(400).json({ error: 'Faltan campos: sucursal_id, tipo, fecha_hora' });
     if (!['AUDITORIA', 'SEGUIMIENTO', 'TAREA'].includes(tipo)) return res.status(400).json({ error: 'tipo inválido' });
     if (tipo !== 'TAREA' && !template_id) return res.status(400).json({ error: 'Falta template_id para una auditoría/seguimiento' });
@@ -189,6 +228,12 @@ module.exports = function registrarRutasCalendario(app) {
     if (template_id) {
       const { rows } = await db.query('SELECT nombre, tipo FROM audit_templates WHERE id = $1', [template_id]);
       plantilla = rows[0];
+    }
+    let tareaCatalogo = null;
+    if (tipo === 'TAREA' && tarea_catalogo_id) {
+      const { rows } = await db.query('SELECT nombre, foto_requerida FROM tareas_catalogo WHERE id = $1', [tarea_catalogo_id]);
+      tareaCatalogo = rows[0];
+      if (!tareaCatalogo) return res.status(400).json({ error: 'Tarea de catálogo no encontrada' });
     }
     // Un Gerente solo puede programar cosas de su propia sucursal, y solo
     // auditorías internas (nunca de marca) o tareas - las de marca las
@@ -200,8 +245,9 @@ module.exports = function registrarRutasCalendario(app) {
       return res.status(403).json({ error: 'Solo Administrador, Auditor o Gerente pueden programar el calendario' });
     }
 
-    let tituloFinal = titulo || plantilla?.nombre;
+    let tituloFinal = titulo || tareaCatalogo?.nombre || plantilla?.nombre;
     if (!tituloFinal) return res.status(400).json({ error: 'Falta el título' });
+    const evidenciaObligatoria = tipo === 'TAREA' ? !!(tareaCatalogo ? tareaCatalogo.foto_requerida : foto_requerida) : false;
 
     const fechas = generarFechas(fecha_hora, recurrencia);
     try {
@@ -209,9 +255,10 @@ module.exports = function registrarRutasCalendario(app) {
       const filas = fechas.map((f) => [
         sucursal_id, tipo, tipo === 'TAREA' ? null : template_id, tituloFinal, descripcion || null,
         responsable_user_id || null, f.toISOString(), duracion_minutos || null, req.usuario.usuarioId,
+        tipo === 'TAREA' ? (tarea_catalogo_id || null) : null, evidenciaObligatoria,
       ]);
       const insertados = await db.bulkInsert(db.pool, 'schedule_events',
-        ['sucursal_id', 'tipo', 'template_id', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'duracion_minutos', 'creado_por'],
+        ['sucursal_id', 'tipo', 'template_id', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'duracion_minutos', 'creado_por', 'tarea_catalogo_id', 'evidencia_obligatoria'],
         filas, 'id');
       if (insertados.length > 1) {
         const serieId = insertados[0].id;
@@ -222,6 +269,65 @@ module.exports = function registrarRutasCalendario(app) {
           `Nueva ${tipo === 'TAREA' ? 'tarea' : 'auditoría'} programada en el calendario.`, { evento_id: insertados[0].id });
       }
       res.status(201).json({ creados: insertados.length });
+    } catch (err) {
+      res.status(err.status || 400).json({ error: err.message });
+    }
+  });
+
+  // Tarea rutinaria recurrente (semanal o mensual) - a diferencia de la
+  // recurrencia genérica de POST /api/calendario (que solo repite en el
+  // mismo día de la semana/mes indefinidamente), acá se eligen días
+  // puntuales y, opcionalmente, si la tarea no tiene horario fijo
+  // (hora_definida = false, ver panel Tareas para el cálculo de demora).
+  // Body: { sucursal_id, tarea_catalogo_id | (titulo + foto_requerida para "Otro"),
+  // descripcion, responsable_user_id, frecuencia: 'SEMANAL'|'MENSUAL',
+  // dias_semana[] | dias_mes[], hora (opcional 'HH:MM'), fecha_desde, fecha_hasta (opcional) }
+  app.post('/api/calendario/tareas/programar', async (req, res) => {
+    const {
+      sucursal_id, tarea_catalogo_id, titulo, descripcion, foto_requerida,
+      responsable_user_id, frecuencia, dias_semana, dias_mes, hora, fecha_desde, fecha_hasta,
+    } = req.body;
+    if (!sucursal_id || !frecuencia || !fecha_desde) return res.status(400).json({ error: 'Faltan campos: sucursal_id, frecuencia, fecha_desde' });
+    if (!['SEMANAL', 'MENSUAL'].includes(frecuencia)) return res.status(400).json({ error: 'frecuencia inválida' });
+    if (frecuencia === 'SEMANAL' && (!Array.isArray(dias_semana) || !dias_semana.length)) return res.status(400).json({ error: 'Falta dias_semana' });
+    if (frecuencia === 'MENSUAL' && (!Array.isArray(dias_mes) || !dias_mes.length)) return res.status(400).json({ error: 'Falta dias_mes' });
+    if (!puedeAccederSucursal(req.usuario, sucursal_id)) return res.status(403).json({ error: 'No tenés acceso a esa sucursal' });
+    if (req.usuario.rol === 'GERENTE' && Number(sucursal_id) !== req.usuario.sucursal_id) return res.status(403).json({ error: 'Solo podés programar en tu propia sucursal' });
+    if (!['ADMIN', 'AUDITOR', 'GERENTE'].includes(req.usuario.rol)) return res.status(403).json({ error: 'Solo Administrador, Auditor o Gerente pueden programar tareas' });
+
+    try {
+      let tituloFinal = titulo;
+      let evidenciaObligatoria = !!foto_requerida;
+      if (tarea_catalogo_id) {
+        const { rows } = await db.query('SELECT nombre, foto_requerida FROM tareas_catalogo WHERE id = $1', [tarea_catalogo_id]);
+        if (!rows[0]) return res.status(400).json({ error: 'Tarea de catálogo no encontrada' });
+        tituloFinal = rows[0].nombre;
+        evidenciaObligatoria = rows[0].foto_requerida;
+      }
+      if (!tituloFinal) return res.status(400).json({ error: 'Falta el título' });
+
+      await validarResponsablePermitido(req.usuario, responsable_user_id);
+      const fechas = frecuencia === 'SEMANAL'
+        ? generarFechasTareaPorDiaSemana(fecha_desde, fecha_hasta || null, dias_semana, hora || null)
+        : generarFechasTareaPorDiaDelMes(fecha_desde, fecha_hasta || null, dias_mes, hora || null);
+      if (!fechas.length) return res.status(400).json({ error: 'El rango de fechas no generó ninguna ocurrencia' });
+
+      const filas = fechas.map((f) => [
+        sucursal_id, 'TAREA', tituloFinal, descripcion || null, responsable_user_id || null, f.toISOString(),
+        req.usuario.usuarioId, tarea_catalogo_id || null, evidenciaObligatoria, !!hora,
+      ]);
+      const insertados = await db.bulkInsert(db.pool, 'schedule_events',
+        ['sucursal_id', 'tipo', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'creado_por', 'tarea_catalogo_id', 'evidencia_obligatoria', 'hora_definida'],
+        filas, 'id');
+      const serieId = insertados[0].id;
+      await db.query('UPDATE schedule_events SET serie_id = $1 WHERE id = ANY($2)', [serieId, insertados.map((r) => r.id)]);
+      if (responsable_user_id) {
+        await crearNotificacion(responsable_user_id, 'ASIGNACION',
+          insertados.length === 1 ? `Te asignaron: ${tituloFinal}` : `Tarea recurrente asignada: ${tituloFinal}`,
+          insertados.length === 1 ? 'Nueva tarea programada en el calendario.' : `Se programaron ${insertados.length} ocurrencias en el calendario.`,
+          { evento_ids: insertados.map((r) => r.id) });
+      }
+      res.status(201).json({ creados: insertados.length, ventanaSinFin: !fecha_hasta ? DIAS_VENTANA_SIN_FIN : null });
     } catch (err) {
       res.status(err.status || 400).json({ error: err.message });
     }
