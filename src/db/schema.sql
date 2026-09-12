@@ -9,6 +9,8 @@ CREATE TABLE sucursales (
   codigo                TEXT UNIQUE,
   direccion             TEXT,
   activo                BOOLEAN NOT NULL DEFAULT true,
+  latitud               NUMERIC(9,6),   -- opcionales - sin coordenadas simplemente no se muestra clima (ver src/clima)
+  longitud              NUMERIC(9,6),
   creado_en             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 

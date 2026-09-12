@@ -22,6 +22,7 @@ const { requireAuth, requireAdmin, puedeAccederSucursal, scopeSucursal, canAcces
 const { enviarMail } = require('../mailer');
 const { urlDeSubida } = require('../storage');
 const { calcularPuntaje } = require('../scoring');
+const { obtenerPronostico } = require('../clima');
 
 const app = express();
 
@@ -225,18 +226,34 @@ app.post('/api/sucursales', requireAdmin, async (req, res) => {
 });
 
 app.patch('/api/sucursales/:id', requireAdmin, async (req, res) => {
-  const { nombre, codigo, direccion, activo } = req.body;
+  const { nombre, codigo, direccion, activo, latitud, longitud } = req.body;
   try {
     const { rows } = await db.query(
       `UPDATE sucursales SET nombre = COALESCE($1,nombre), codigo = COALESCE($2,codigo),
-       direccion = COALESCE($3,direccion), activo = COALESCE($4,activo)
-       WHERE id = $5 RETURNING *`,
-      [nombre ?? null, codigo ?? null, direccion ?? null, activo ?? null, req.params.id]
+       direccion = COALESCE($3,direccion), activo = COALESCE($4,activo),
+       latitud = COALESCE($5,latitud), longitud = COALESCE($6,longitud)
+       WHERE id = $7 RETURNING *`,
+      [nombre ?? null, codigo ?? null, direccion ?? null, activo ?? null, latitud ?? null, longitud ?? null, req.params.id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Sucursal no encontrada' });
     res.json(rows[0]);
   } catch (err) {
     res.status(400).json({ error: err.message });
+  }
+});
+
+// Pronóstico informativo (16 días) para el calendario - array vacío si la
+// sucursal no tiene coordenadas cargadas (ver clima/index.js).
+app.get('/api/sucursales/:id/clima', async (req, res) => {
+  if (!puedeAccederSucursal(req.usuario, req.params.id)) return res.status(403).json({ error: 'No tenés acceso a esa sucursal' });
+  try {
+    const { rows } = await db.query('SELECT latitud, longitud FROM sucursales WHERE id = $1', [req.params.id]);
+    const sucursal = rows[0];
+    if (!sucursal?.latitud || !sucursal?.longitud) return res.json([]);
+    const dias = await obtenerPronostico(sucursal.latitud, sucursal.longitud);
+    res.json(dias);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
   }
 });
 
