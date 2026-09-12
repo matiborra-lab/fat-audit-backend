@@ -198,9 +198,11 @@ module.exports = function registrarRutasCalendario(app) {
     let params = [];
     if (req.usuario.rol === 'COLABORADOR') {
       // Un Colaborador solo ve lo que tiene asignado (sus turnos y las
-      // tareas/auditorías donde es responsable) - nunca el calendario
-      // completo de la sucursal.
-      params.push(req.usuario.usuarioId); sql += ` AND e.responsable_user_id = $${params.length}`;
+      // tareas/auditorías donde es responsable), más los Eventos especiales
+      // sin responsable de su propia sucursal (feriados/promos, visibles a
+      // todos) - nunca el calendario completo de la sucursal.
+      params.push(req.usuario.usuarioId); params.push(req.usuario.sucursal_id);
+      sql += ` AND (e.responsable_user_id = $${params.length - 1} OR (e.tipo = 'EVENTO_ESPECIAL' AND e.responsable_user_id IS NULL AND e.sucursal_id = $${params.length}))`;
     } else if (req.usuario.rol === 'GERENTE') {
       const scoped = scopeSucursal(req.usuario, 'e.sucursal_id', params);
       sql += scoped.sql; params = scoped.params;
@@ -224,11 +226,44 @@ module.exports = function registrarRutasCalendario(app) {
 
   // Body: { sucursal_id, tipo, template_id (AUDITORIA), tarea_catalogo_id (TAREA),
   // foto_requerida (TAREA "Otro"), titulo, descripcion, responsable_user_id,
-  // fecha_hora, duracion_minutos, recurrencia }
+  // fecha_hora, duracion_minutos, recurrencia, todas_sucursales (EVENTO_ESPECIAL) }
   app.post('/api/calendario', async (req, res) => {
-    const { sucursal_id, tipo, template_id, tarea_catalogo_id, foto_requerida, titulo, descripcion, responsable_user_id, fecha_hora, duracion_minutos, recurrencia } = req.body;
-    if (!sucursal_id || !tipo || !fecha_hora) return res.status(400).json({ error: 'Faltan campos: sucursal_id, tipo, fecha_hora' });
-    if (!['AUDITORIA', 'SEGUIMIENTO', 'TAREA'].includes(tipo)) return res.status(400).json({ error: 'tipo inválido' });
+    const { sucursal_id, tipo, template_id, tarea_catalogo_id, foto_requerida, titulo, descripcion, responsable_user_id, fecha_hora, duracion_minutos, recurrencia, todas_sucursales } = req.body;
+    if (!tipo || !fecha_hora) return res.status(400).json({ error: 'Faltan campos: tipo, fecha_hora' });
+    if (!['AUDITORIA', 'SEGUIMIENTO', 'TAREA', 'EVENTO_ESPECIAL'].includes(tipo)) return res.status(400).json({ error: 'tipo inválido' });
+
+    // Evento especial (feriado/promo): sin plantilla, alcance de una sucursal
+    // o todas a la vez (una fila por sucursal, agrupadas en una serie),
+    // responsable opcional, sin recurrencia - solo Admin/Auditor lo crean.
+    if (tipo === 'EVENTO_ESPECIAL') {
+      if (req.usuario.rol !== 'ADMIN' && req.usuario.rol !== 'AUDITOR') return res.status(403).json({ error: 'Solo Administrador o Auditor pueden crear un evento especial' });
+      if (!titulo) return res.status(400).json({ error: 'Falta el título' });
+      try {
+        let sucursalIds;
+        if (todas_sucursales) {
+          const { rows } = await db.query('SELECT id FROM sucursales WHERE activo = true');
+          sucursalIds = rows.map((r) => r.id);
+        } else {
+          if (!sucursal_id) return res.status(400).json({ error: 'Falta sucursal_id (o todas_sucursales)' });
+          sucursalIds = [Number(sucursal_id)];
+        }
+        const filas = sucursalIds.map((sId) => [sId, 'EVENTO_ESPECIAL', titulo, descripcion || null, responsable_user_id || null, fecha_hora, req.usuario.usuarioId]);
+        const insertados = await db.bulkInsert(db.pool, 'schedule_events',
+          ['sucursal_id', 'tipo', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'creado_por'],
+          filas, 'id');
+        const serieId = insertados[0].id;
+        await db.query('UPDATE schedule_events SET serie_id = $1 WHERE id = ANY($2)', [serieId, insertados.map((r) => r.id)]);
+        if (responsable_user_id) {
+          await crearNotificacion(responsable_user_id, 'ASIGNACION', `Te asignaron: ${titulo}`,
+            'Nuevo evento especial programado en el calendario.', { evento_id: insertados[0].id });
+        }
+        return res.status(201).json({ creados: insertados.length });
+      } catch (err) {
+        return res.status(err.status || 400).json({ error: err.message });
+      }
+    }
+
+    if (!sucursal_id) return res.status(400).json({ error: 'Falta sucursal_id' });
     if (tipo !== 'TAREA' && !template_id) return res.status(400).json({ error: 'Falta template_id para una auditoría/seguimiento' });
     if (!puedeAccederSucursal(req.usuario, sucursal_id)) return res.status(403).json({ error: 'No tenés acceso a esa sucursal' });
 

@@ -456,23 +456,33 @@ app.get('/api/usuarios/buscar', async (req, res) => {
   if (req.usuario.rol === 'GERENTE' || req.usuario.rol === 'COLABORADOR') {
     sucursalId = req.usuario.sucursal_id;
   }
-  if (!sucursalId) return res.status(400).json({ error: 'Falta el parámetro: sucursal_id' });
+  // "Todas las sucursales": solo Admin/Auditor, para elegir responsable de un
+  // Evento especial que no está atado a una sucursal en particular.
+  const todasLasSucursales = !sucursalId && req.query.todas === 'true' && (req.usuario.rol === 'ADMIN' || req.usuario.rol === 'AUDITOR');
+  if (!sucursalId && !todasLasSucursales) return res.status(400).json({ error: 'Falta el parámetro: sucursal_id' });
 
   try {
-    const params = [sucursalId];
-    // Un Gerente no puede elegir Admin ni Auditor como responsable (solo a
-    // otro Gerente de su sucursal o a un Colaborador) - Admin/Auditor
-    // siguen viendo a todos, incluidos ellos mismos.
-    let sql = req.usuario.rol === 'GERENTE'
-      ? `SELECT id, nombre, email, rol, puesto FROM usuarios
-         WHERE activo = true AND sucursal_id = $1 AND rol IN ('GERENTE','COLABORADOR')`
-      : `SELECT id, nombre, email, rol, puesto FROM usuarios
-         WHERE activo = true AND (sucursal_id = $1 OR rol IN ('ADMIN','AUDITOR'))`;
+    const params = [];
+    let sql;
+    if (todasLasSucursales) {
+      sql = `SELECT u.id, u.nombre, u.email, u.rol, u.puesto, s.nombre AS sucursal_nombre
+             FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id WHERE u.activo = true`;
+    } else {
+      params.push(sucursalId);
+      // Un Gerente no puede elegir Admin ni Auditor como responsable (solo a
+      // otro Gerente de su sucursal o a un Colaborador) - Admin/Auditor
+      // siguen viendo a todos, incluidos ellos mismos.
+      sql = req.usuario.rol === 'GERENTE'
+        ? `SELECT id, nombre, email, rol, puesto FROM usuarios
+           WHERE activo = true AND sucursal_id = $1 AND rol IN ('GERENTE','COLABORADOR')`
+        : `SELECT id, nombre, email, rol, puesto FROM usuarios
+           WHERE activo = true AND (sucursal_id = $1 OR rol IN ('ADMIN','AUDITOR'))`;
+    }
     if (q) {
       params.push(`%${q}%`);
-      sql += ` AND (nombre ILIKE $${params.length} OR email ILIKE $${params.length})`;
+      sql += ` AND (${todasLasSucursales ? 'u.nombre' : 'nombre'} ILIKE $${params.length} OR ${todasLasSucursales ? 'u.email' : 'email'} ILIKE $${params.length})`;
     }
-    sql += ' ORDER BY (rol = \'COLABORADOR\') DESC, (rol = \'GERENTE\') DESC, nombre LIMIT 20';
+    sql += ` ORDER BY (${todasLasSucursales ? 'u.rol' : 'rol'} = 'COLABORADOR') DESC, (${todasLasSucursales ? 'u.rol' : 'rol'} = 'GERENTE') DESC, ${todasLasSucursales ? 'u.nombre' : 'nombre'} LIMIT 20`;
     const { rows } = await db.query(sql, params);
     res.json(rows);
   } catch (err) {

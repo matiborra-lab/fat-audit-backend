@@ -248,7 +248,7 @@ CREATE TABLE semaforo_config (
 CREATE TABLE schedule_events (
   id                    SERIAL PRIMARY KEY,
   sucursal_id           INTEGER NOT NULL REFERENCES sucursales(id) ON DELETE CASCADE,
-  tipo                  TEXT NOT NULL CHECK (tipo IN ('AUDITORIA', 'SEGUIMIENTO', 'TAREA', 'TURNO')),
+  tipo                  TEXT NOT NULL CHECK (tipo IN ('AUDITORIA', 'SEGUIMIENTO', 'TAREA', 'TURNO', 'EVENTO_ESPECIAL')),
   template_id           INTEGER REFERENCES audit_templates(id) ON DELETE SET NULL, -- solo AUDITORIA/SEGUIMIENTO: que plantilla precargar
   titulo                TEXT NOT NULL,
   descripcion           TEXT,
