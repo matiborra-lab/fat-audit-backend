@@ -85,7 +85,7 @@ async function generarPdfAuditoria(run) {
   doc.moveDown(3);
   const y0 = 110;
   doc.fontSize(10).font('Helvetica-Bold').text('Sucursal:', 40, y0, { continued: true }).font('Helvetica').text(' ' + (run.sucursal_nombre || '—'));
-  doc.font('Helvetica-Bold').text('Fecha:', 40, y0 + 16, { continued: true }).font('Helvetica').text(' ' + new Date(run.completada_en || run.creado_en).toLocaleString('es-AR'));
+  doc.font('Helvetica-Bold').text('Fecha:', 40, y0 + 16, { continued: true }).font('Helvetica').text(' ' + new Date(run.completada_en || run.creado_en).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', hour12: false }));
   doc.font('Helvetica-Bold').text('Auditor:', 40, y0 + 32, { continued: true }).font('Helvetica').text(' ' + (run.auditor_nombre || '—'));
   doc.font('Helvetica-Bold').text('Tipo:', 300, y0, { continued: true }).font('Helvetica').text(' ' + run.tipo);
   doc.font('Helvetica-Bold').text('Responsable:', 300, y0 + 16, { continued: true }).font('Helvetica').text(' ' + (run.responsable_nombre || '—'));

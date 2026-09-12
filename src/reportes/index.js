@@ -70,7 +70,7 @@ async function generarResumenHtml({ sucursalId, desde, hasta }) {
     <tr>
       <td style="padding:4px 8px;border-bottom:1px solid #eee;">${r.sucursal_nombre}</td>
       <td style="padding:4px 8px;border-bottom:1px solid #eee;">${r.plantilla_nombre}</td>
-      <td style="padding:4px 8px;border-bottom:1px solid #eee;">${new Date(r.completada_en).toLocaleDateString('es-AR')}</td>
+      <td style="padding:4px 8px;border-bottom:1px solid #eee;">${new Date(r.completada_en).toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}</td>
       <td style="padding:4px 8px;border-bottom:1px solid #eee;">${Math.round((r.puntaje_total || 0) * 100)}%</td>
       <td style="padding:4px 8px;border-bottom:1px solid #eee;">${etiquetaSemaforo(r.semaforo)}</td>
       <td style="padding:4px 8px;border-bottom:1px solid #eee;">${r.resultado}</td>
@@ -99,7 +99,7 @@ async function enviarReporte(reporte, ahora) {
   await enviarMail({
     to: reporte.destinatarios,
     subject: `FAT Audit — Reporte ${reporte.frecuencia === 'SEMANAL' ? 'semanal' : 'mensual'}: ${reporte.nombre}`,
-    html: `<p>Resumen de auditorías (${alcance}) del ${desde.toLocaleDateString('es-AR')} al ${ahora.toLocaleDateString('es-AR')}.</p>${html}`,
+    html: `<p>Resumen de auditorías (${alcance}) del ${desde.toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })} al ${ahora.toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}.</p>${html}`,
   });
   await db.query('UPDATE reportes_programados SET ultimo_envio_en = $1 WHERE id = $2', [ahora.toISOString(), reporte.id]);
   return cantidad;

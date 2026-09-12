@@ -12,6 +12,11 @@
  */
 
 require('dotenv').config();
+// Fija el huso horario del proceso a Argentina - sin esto, un `new Date()`
+// de un string sin offset (ej. fecha_hora armada como "2026-09-12T18:29:00")
+// se interpreta en el huso del SO del hosting (a menudo UTC), corriendo
+// horas/fechas mal en cualquier entorno que no sea explícitamente Argentina.
+process.env.TZ = 'America/Argentina/Buenos_Aires';
 const express = require('express');
 const cors = require('cors');
 const db = require('../db');

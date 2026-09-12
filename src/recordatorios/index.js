@@ -26,7 +26,7 @@ async function verificarRecordatorios() {
     );
     for (const evento of rows) {
       try {
-        const hora = new Date(evento.fecha_hora).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit' });
+        const hora = new Date(evento.fecha_hora).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' });
         await crearNotificacion(evento.responsable_user_id, 'RECORDATORIO_SEGUIMIENTO',
           'Recordatorio: seguimiento programado hoy',
           `Tenés un seguimiento programado hoy en ${evento.sucursal_nombre} a las ${hora}.`,

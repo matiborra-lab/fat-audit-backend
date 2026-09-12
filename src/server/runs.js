@@ -280,7 +280,7 @@ module.exports = function registrarRutasRuns(app) {
       const buffer = await generarPdfAuditoria(runCompleto);
       await enviarMail({
         to: destinatarios,
-        subject: `Informe de auditoría — ${runCompleto.sucursal_nombre} — ${new Date(runCompleto.completada_en).toLocaleDateString('es-AR')}`,
+        subject: `Informe de auditoría — ${runCompleto.sucursal_nombre} — ${new Date(runCompleto.completada_en).toLocaleDateString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires' })}`,
         html: `<p>Adjuntamos el informe de la auditoría realizada en <strong>${runCompleto.sucursal_nombre}</strong>.</p>
                <p>Puntaje total: <strong>${Math.round((runCompleto.puntaje_total || 0) * 100)}%</strong> · Resultado: <strong>${runCompleto.resultado}</strong></p>`,
         attachments: [{ filename: `auditoria-${req.params.id}.pdf`, content: buffer }],
@@ -431,7 +431,7 @@ module.exports = function registrarRutasRuns(app) {
       const evento = rows[0];
       if (notificar) {
         await crearNotificacion(responsable_user_id, 'ASIGNACION', 'Seguimiento asignado',
-          `Se te asignó un seguimiento para el ${new Date(fecha_hora).toLocaleString('es-AR')}.`,
+          `Se te asignó un seguimiento para el ${new Date(fecha_hora).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', hour12: false })}.`,
           { evento_id: evento.id, sucursal_id: run.sucursal_id });
       }
       res.status(201).json(evento);

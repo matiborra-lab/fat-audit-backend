@@ -16,6 +16,14 @@ const pool = new Pool({
   ssl: process.env.DATABASE_URL?.includes('sslmode=require') || process.env.NODE_ENV === 'production'
     ? { rejectUnauthorized: false }
     : false,
+  // Sin esto, `CURRENT_DATE`, `now()` y cualquier `::date`/`::time` sobre una
+  // columna TIMESTAMPTZ (ej. el chequeo de recordatorios de hoy) usan el
+  // huso horario por default del servidor Postgres (normalmente UTC en
+  // Railway/Neon), no el de Argentina - un evento a las 23:30 ART cae en el
+  // dia siguiente en UTC y esos chequeos comparan mal el "dia de hoy". Se
+  // fija via startup parameter (no con un `SET TIME ZONE` en 'connect', que
+  // corre en paralelo con la primera query del cliente recien conectado).
+  options: '-c TimeZone=America/Argentina/Buenos_Aires',
 });
 
 function query(text, params) {
