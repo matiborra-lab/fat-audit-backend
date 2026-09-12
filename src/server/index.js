@@ -25,8 +25,11 @@ const { calcularPuntaje } = require('../scoring');
 
 const app = express();
 
+// FRONTEND_URL admite varias URLs separadas por coma (ej: la del dominio
+// propio + la de vercel.app de respaldo) - así migrar a un dominio nuevo no
+// corta el acceso desde la URL vieja mientras el DNS todavia propaga.
 const origenesPermitidos = new Set(
-  ['http://localhost:5173', process.env.FRONTEND_URL].filter(Boolean)
+  ['http://localhost:5173', ...(process.env.FRONTEND_URL || '').split(',').map((u) => u.trim())].filter(Boolean)
 );
 app.use(cors({
   origin(origin, callback) {
@@ -62,7 +65,10 @@ function requireAdminOGerente(req, res, next) {
 }
 
 function linkDefinirPassword(token) {
-  const base = process.env.FRONTEND_URL || 'http://localhost:5173';
+  // FRONTEND_URL puede traer varias URLs separadas por coma (ver
+  // origenesPermitidos) - la primera es la canónica, la que va en los
+  // links de los mails.
+  const base = (process.env.FRONTEND_URL || 'http://localhost:5173').split(',')[0].trim();
   return base.replace(/\/$/, '') + '/definir-clave?token=' + token;
 }
 
