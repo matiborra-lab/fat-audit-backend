@@ -356,6 +356,25 @@ CREATE TABLE push_subscriptions (
 CREATE INDEX idx_push_subscriptions_usuario ON push_subscriptions (usuario_id);
 
 -- ============================================================
+-- FERIADOS (ArgentinaDatos)
+-- ============================================================
+
+-- Cache local del endpoint publico de ArgentinaDatos - nacionales
+-- (inamovible), trasladables y puentes turisticos. Se reemplaza entero por
+-- anio en cada actualizacion (ver src/feriados) en vez de upsert fila por
+-- fila; si la API no responde, se conserva lo que ya habia (el reemplazo
+-- solo ocurre despues de un fetch exitoso).
+CREATE TABLE feriados (
+  id             SERIAL PRIMARY KEY,
+  fecha          DATE NOT NULL,
+  nombre         TEXT NOT NULL,
+  tipo           TEXT NOT NULL CHECK (tipo IN ('inamovible', 'trasladable', 'puente')),
+  anio           INTEGER NOT NULL,
+  actualizado_en TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_feriados_fecha ON feriados (fecha);
+
+-- ============================================================
 -- REPORTES PROGRAMADOS
 -- ============================================================
 

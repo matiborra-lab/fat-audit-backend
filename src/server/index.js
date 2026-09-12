@@ -23,6 +23,7 @@ const { enviarMail } = require('../mailer');
 const { urlDeSubida } = require('../storage');
 const { calcularPuntaje } = require('../scoring');
 const { obtenerPronostico } = require('../clima');
+const { actualizarFeriados } = require('../feriados');
 
 const app = express();
 
@@ -254,6 +255,39 @@ app.get('/api/sucursales/:id/clima', async (req, res) => {
     res.json(dias);
   } catch (err) {
     res.status(500).json({ error: err.message });
+  }
+});
+
+// Feriados nacionales/trasladables/puentes (ArgentinaDatos, cacheados en la
+// tabla feriados) - no son de una sucursal en particular, cualquier usuario
+// autenticado los puede ver.
+app.get('/api/feriados', async (req, res) => {
+  const { desde, hasta } = req.query;
+  try {
+    // to_char en vez de devolver la columna DATE cruda - pg la serializa como
+    // timestamp completo (medianoche UTC) y el frontend compara por fecha
+    // exacta 'YYYY-MM-DD' (mismo formato que aClaveDia).
+    let sql = "SELECT to_char(fecha, 'YYYY-MM-DD') AS fecha, nombre, tipo FROM feriados WHERE 1=1";
+    const params = [];
+    if (desde) { params.push(desde); sql += ` AND fecha >= $${params.length}`; }
+    if (hasta) { params.push(hasta); sql += ` AND fecha <= $${params.length}`; }
+    sql += ' ORDER BY fecha';
+    const { rows } = await db.query(sql, params);
+    res.json(rows);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// Actualización manual (fuerza el refresco aunque ya haya datos cacheados) -
+// solo Admin, desde Configuración.
+app.post('/api/feriados/actualizar', requireAdmin, async (req, res) => {
+  const anio = Number(req.body.anio) || new Date().getFullYear();
+  try {
+    const cantidad = await actualizarFeriados(anio);
+    res.json({ anio, actualizados: cantidad });
+  } catch (err) {
+    res.status(502).json({ error: 'No se pudo actualizar desde ArgentinaDatos: ' + err.message });
   }
 });
 
@@ -527,6 +561,9 @@ iniciarScheduler();
 
 const { iniciarSchedulerRecordatorios } = require('../recordatorios');
 iniciarSchedulerRecordatorios();
+
+const { iniciarSchedulerFeriados } = require('../feriados');
+iniciarSchedulerFeriados();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FAT Audit backend escuchando en :${PORT}`));
