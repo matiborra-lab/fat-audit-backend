@@ -234,11 +234,16 @@ app.patch('/api/sucursales/:id', requireAdmin, async (req, res) => {
        direccion = COALESCE($3,direccion), activo = COALESCE($4,activo),
        latitud = COALESCE($5,latitud), longitud = COALESCE($6,longitud)
        WHERE id = $7 RETURNING *`,
-      [nombre ?? null, codigo ?? null, direccion ?? null, activo ?? null, latitud ?? null, longitud ?? null, req.params.id]
+      // codigo/direccion son opcionales - un '' del formulario (campo vacío)
+      // se trata igual que "no lo mandó" (COALESCE lo conserva), en vez de
+      // pisar la columna con '' y chocar con la unique de sucursales.codigo
+      // si otra sucursal ya tiene código vacío.
+      [nombre ?? null, codigo || null, direccion || null, activo ?? null, latitud ?? null, longitud ?? null, req.params.id]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Sucursal no encontrada' });
     res.json(rows[0]);
   } catch (err) {
+    if (err.code === '23505') return res.status(400).json({ error: 'Ya existe una sucursal con ese código' });
     res.status(400).json({ error: err.message });
   }
 });
