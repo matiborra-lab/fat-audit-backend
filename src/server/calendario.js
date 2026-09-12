@@ -207,7 +207,8 @@ module.exports = function registrarRutasCalendario(app) {
       const scoped = scopeSucursal(req.usuario, 'e.sucursal_id', params);
       sql += scoped.sql; params = scoped.params;
     } else if (sucursal_id) {
-      params.push(sucursal_id); sql += ` AND e.sucursal_id = $${params.length}`;
+      // Acepta uno o varios ids separados por coma (filtro multi-sucursal del calendario).
+      params.push(String(sucursal_id).split(',').map(Number)); sql += ` AND e.sucursal_id = ANY($${params.length})`;
     }
     if (desde) { params.push(desde); sql += ` AND e.fecha_hora >= $${params.length}`; }
     if (hasta) { params.push(hasta); sql += ` AND e.fecha_hora <= $${params.length}`; }
@@ -226,15 +227,17 @@ module.exports = function registrarRutasCalendario(app) {
 
   // Body: { sucursal_id, tipo, template_id (AUDITORIA), tarea_catalogo_id (TAREA),
   // foto_requerida (TAREA "Otro"), titulo, descripcion, responsable_user_id,
-  // fecha_hora, duracion_minutos, recurrencia, todas_sucursales (EVENTO_ESPECIAL) }
+  // fecha_hora, duracion_minutos, recurrencia,
+  // todas_sucursales | sucursal_ids[] | sucursal_id (EVENTO_ESPECIAL) }
   app.post('/api/calendario', async (req, res) => {
-    const { sucursal_id, tipo, template_id, tarea_catalogo_id, foto_requerida, titulo, descripcion, responsable_user_id, fecha_hora, duracion_minutos, recurrencia, todas_sucursales } = req.body;
+    const { sucursal_id, sucursal_ids, tipo, template_id, tarea_catalogo_id, foto_requerida, titulo, descripcion, responsable_user_id, fecha_hora, duracion_minutos, recurrencia, todas_sucursales } = req.body;
     if (!tipo || !fecha_hora) return res.status(400).json({ error: 'Faltan campos: tipo, fecha_hora' });
     if (!['AUDITORIA', 'SEGUIMIENTO', 'TAREA', 'EVENTO_ESPECIAL'].includes(tipo)) return res.status(400).json({ error: 'tipo inválido' });
 
-    // Evento especial (feriado/promo): sin plantilla, alcance de una sucursal
-    // o todas a la vez (una fila por sucursal, agrupadas en una serie),
-    // responsable opcional, sin recurrencia - solo Admin/Auditor lo crean.
+    // Evento especial (feriado/promo): sin plantilla, alcance de una sucursal,
+    // varias elegidas a mano, o todas a la vez (una fila por sucursal,
+    // agrupadas en una serie), responsable opcional, sin recurrencia - solo
+    // Admin/Auditor lo crean.
     if (tipo === 'EVENTO_ESPECIAL') {
       if (req.usuario.rol !== 'ADMIN' && req.usuario.rol !== 'AUDITOR') return res.status(403).json({ error: 'Solo Administrador o Auditor pueden crear un evento especial' });
       if (!titulo) return res.status(400).json({ error: 'Falta el título' });
@@ -243,8 +246,10 @@ module.exports = function registrarRutasCalendario(app) {
         if (todas_sucursales) {
           const { rows } = await db.query('SELECT id FROM sucursales WHERE activo = true');
           sucursalIds = rows.map((r) => r.id);
+        } else if (Array.isArray(sucursal_ids) && sucursal_ids.length) {
+          sucursalIds = sucursal_ids.map(Number);
         } else {
-          if (!sucursal_id) return res.status(400).json({ error: 'Falta sucursal_id (o todas_sucursales)' });
+          if (!sucursal_id) return res.status(400).json({ error: 'Falta sucursal_id, sucursal_ids o todas_sucursales' });
           sucursalIds = [Number(sucursal_id)];
         }
         const filas = sucursalIds.map((sId) => [sId, 'EVENTO_ESPECIAL', titulo, descripcion || null, responsable_user_id || null, fecha_hora, req.usuario.usuarioId]);
