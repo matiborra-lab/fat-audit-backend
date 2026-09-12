@@ -196,6 +196,30 @@ module.exports = function registrarRutasRuns(app) {
     }
   });
 
+  // Última auditoría de MARCA completada de una sucursal - usada por el
+  // seguimiento programado desde el calendario (sin plantilla: sale de los
+  // hallazgos de esta auditoría, ver crearRunDesdeHallazgos).
+  app.get('/api/runs/ultima-marca', async (req, res) => {
+    const sucursalId = Number(req.query.sucursal_id);
+    if (!sucursalId || !puedeAccederSucursal(req.usuario, sucursalId)) {
+      return res.status(403).json({ error: 'No tenés acceso a esa sucursal' });
+    }
+    try {
+      const { rows } = await db.query(
+        `SELECT r.*, s.nombre AS sucursal_nombre FROM audit_runs r JOIN sucursales s ON s.id = r.sucursal_id
+         WHERE r.sucursal_id = $1 AND r.tipo = 'MARCA' AND r.estado = 'COMPLETADA'
+         ORDER BY r.completada_en DESC LIMIT 1`,
+        [sucursalId]
+      );
+      const run = rows[0];
+      if (!run) return res.status(404).json({ error: 'Todavía no hay ninguna auditoría de marca completada en esta sucursal' });
+      const { rows: respuestas } = await db.query('SELECT * FROM audit_respuestas WHERE run_id = $1', [run.id]);
+      res.json({ ...run, respuestas });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.get('/api/runs/:id', async (req, res) => {
     const run = await obtenerRunOForbidden(req, res);
     if (!run) return;
@@ -383,10 +407,11 @@ module.exports = function registrarRutasRuns(app) {
   // responsable concretos, que se inicia mas adelante desde el calendario
   // (ver /api/calendario/:id/iniciar y crearRunDesdeHallazgos). El
   // responsable recibe una notificacion ahora y un recordatorio el dia de
-  // la fecha programada (ver src/recordatorios).
+  // la fecha programada (ver src/recordatorios). Un Gerente tambien puede
+  // generarlo (limitado a su propia sucursal, via obtenerRunOForbidden).
   app.post('/api/runs/:id/seguimiento', async (req, res) => {
-    if (req.usuario.rol !== 'ADMIN' && req.usuario.rol !== 'AUDITOR') {
-      return res.status(403).json({ error: 'Solo administrador o auditor pueden generar un seguimiento' });
+    if (!['ADMIN', 'AUDITOR', 'GERENTE'].includes(req.usuario.rol)) {
+      return res.status(403).json({ error: 'Solo administrador, auditor o gerente pueden generar un seguimiento' });
     }
     const run = await obtenerRunOForbidden(req, res);
     if (!run) return;
