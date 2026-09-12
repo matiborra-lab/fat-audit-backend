@@ -230,7 +230,7 @@ module.exports = function registrarRutasCalendario(app) {
   // fecha_hora, duracion_minutos, recurrencia,
   // todas_sucursales | sucursal_ids[] | sucursal_id (EVENTO_ESPECIAL) }
   app.post('/api/calendario', async (req, res) => {
-    const { sucursal_id, sucursal_ids, tipo, template_id, tarea_catalogo_id, foto_requerida, titulo, descripcion, responsable_user_id, fecha_hora, duracion_minutos, recurrencia, todas_sucursales } = req.body;
+    const { sucursal_id, sucursal_ids, tipo, template_id, tarea_catalogo_id, foto_requerida, titulo, descripcion, responsable_user_id, fecha_hora, duracion_minutos, recurrencia, todas_sucursales, hora_definida } = req.body;
     if (!tipo || !fecha_hora) return res.status(400).json({ error: 'Faltan campos: tipo, fecha_hora' });
     if (!['AUDITORIA', 'SEGUIMIENTO', 'TAREA', 'EVENTO_ESPECIAL'].includes(tipo)) return res.status(400).json({ error: 'tipo inválido' });
 
@@ -304,9 +304,10 @@ module.exports = function registrarRutasCalendario(app) {
         sucursal_id, tipo, tipo === 'TAREA' ? null : template_id, tituloFinal, descripcion || null,
         responsable_user_id || null, f.toISOString(), duracion_minutos || null, req.usuario.usuarioId,
         tipo === 'TAREA' ? (tarea_catalogo_id || null) : null, evidenciaObligatoria,
+        tipo === 'TAREA' ? hora_definida !== false : true,
       ]);
       const insertados = await db.bulkInsert(db.pool, 'schedule_events',
-        ['sucursal_id', 'tipo', 'template_id', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'duracion_minutos', 'creado_por', 'tarea_catalogo_id', 'evidencia_obligatoria'],
+        ['sucursal_id', 'tipo', 'template_id', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'duracion_minutos', 'creado_por', 'tarea_catalogo_id', 'evidencia_obligatoria', 'hora_definida'],
         filas, 'id');
       if (insertados.length > 1) {
         const serieId = insertados[0].id;
