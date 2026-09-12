@@ -406,4 +406,63 @@ CREATE TABLE reportes_programados (
     (frecuencia = 'MENSUAL' AND dia_mes IS NOT NULL AND dia_semana IS NULL)
   )
 );
+
+-- ============================================================
+-- PREFERENCIAS DE NOTIFICACION
+-- ============================================================
+
+-- Una fila por usuario+tipo de preferencia (no confundir con
+-- notificaciones.tipo, que es el tipo de la notificacion ya disparada) - si
+-- no hay fila para un usuario+tipo, se asume habilitado=true (default
+-- implicito, ver notificacion-preferencias.js). anticipacion_horas solo
+-- aplica a los tipos RECORDATORIO_* (cuanto antes de la hora del evento se
+-- avisa) - el resto (ASIGNACION_*, TURNOS_ASIGNADOS, CUMPLEANOS) son on/off
+-- puros, sin horario configurable.
+CREATE TABLE notificacion_preferencias (
+  id                  SERIAL PRIMARY KEY,
+  usuario_id          INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  tipo                TEXT NOT NULL CHECK (tipo IN (
+                        'ASIGNACION_TAREA', 'RECORDATORIO_TAREA',
+                        'ASIGNACION_AUDITORIA', 'RECORDATORIO_AUDITORIA',
+                        'ASIGNACION_EVENTO_ESPECIAL', 'RECORDATORIO_EVENTO_ESPECIAL',
+                        'TURNOS_ASIGNADOS', 'CUMPLEANOS', 'CLIMA'
+                      )),
+  habilitado          BOOLEAN NOT NULL DEFAULT true,
+  anticipacion_horas  INTEGER,
+  UNIQUE (usuario_id, tipo)
+);
+
+-- Reglas de clima del usuario (botón "+ Agregar regla") - varias por
+-- usuario, cada una condicional (tipo de clima O temperatura) con su propia
+-- anticipación en días. Se evalúan contra el pronóstico de Open-Meteo de la
+-- sucursal del usuario (ver src/clima).
+CREATE TABLE notificacion_reglas_clima (
+  id                 SERIAL PRIMARY KEY,
+  usuario_id         INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  campo              TEXT NOT NULL CHECK (campo IN ('weather_code', 'temperatura')),
+  operador           TEXT NOT NULL CHECK (operador IN ('eq', 'gte', 'lte')),
+  valor              NUMERIC NOT NULL,
+  anticipacion_dias  INTEGER NOT NULL DEFAULT 0 CHECK (anticipacion_dias BETWEEN 0 AND 10),
+  orden              INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX idx_notificacion_reglas_clima_usuario ON notificacion_reglas_clima (usuario_id);
+
+-- Dedup de recordatorios (para no avisar mas de una vez por evento/dia/regla
+-- en cada corrida del scheduler, ver src/recordatorios). schedule_event_id
+-- se usa para recordatorios de un evento puntual (Tarea/Auditoria/Evento
+-- especial); clave se usa para los que no son de un evento concreto
+-- (Cumpleaños, Clima - ej. 'CUMPLEANOS-<usuario_cumpleañero>-<año>' o
+-- 'CLIMA-<regla_id>-<fecha_pronostico>'). Las dos UNIQUE conviven porque
+-- NULL nunca es igual a NULL en una constraint - una fila de evento (con
+-- clave NULL) nunca choca con una fila de clave (con schedule_event_id NULL).
+CREATE TABLE recordatorios_enviados (
+  id                 SERIAL PRIMARY KEY,
+  schedule_event_id  INTEGER REFERENCES schedule_events(id) ON DELETE CASCADE,
+  usuario_id         INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  tipo               TEXT NOT NULL,
+  clave              TEXT,
+  enviado_en         TIMESTAMPTZ NOT NULL DEFAULT now(),
+  UNIQUE (schedule_event_id, usuario_id, tipo),
+  UNIQUE (usuario_id, tipo, clave)
+);
 CREATE INDEX idx_reportes_programados_activo ON reportes_programados (activo);

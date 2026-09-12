@@ -432,7 +432,7 @@ module.exports = function registrarRutasRuns(app) {
       if (notificar) {
         await crearNotificacion(responsable_user_id, 'ASIGNACION', 'Seguimiento asignado',
           `Se te asignó un seguimiento para el ${new Date(fecha_hora).toLocaleString('es-AR', { timeZone: 'America/Argentina/Buenos_Aires', hour12: false })}.`,
-          { evento_id: evento.id, sucursal_id: run.sucursal_id });
+          { evento_id: evento.id, sucursal_id: run.sucursal_id }, 'ASIGNACION_AUDITORIA');
       }
       res.status(201).json(evento);
     } catch (err) {

@@ -264,7 +264,7 @@ module.exports = function registrarRutasCalendario(app) {
         await db.query('UPDATE schedule_events SET serie_id = $1 WHERE id = ANY($2)', [serieId, insertados.map((r) => r.id)]);
         if (responsable_user_id) {
           await crearNotificacion(responsable_user_id, 'ASIGNACION', `Te asignaron: ${titulo}`,
-            'Nuevo evento especial programado en el calendario.', { evento_id: insertados[0].id });
+            'Nuevo evento especial programado en el calendario.', { evento_id: insertados[0].id }, 'ASIGNACION_EVENTO_ESPECIAL');
         }
         return res.status(201).json({ creados: insertados.length });
       } catch (err) {
@@ -319,7 +319,8 @@ module.exports = function registrarRutasCalendario(app) {
       }
       if (responsable_user_id) {
         await crearNotificacion(responsable_user_id, 'ASIGNACION', `Te asignaron: ${tituloFinal}`,
-          `Nueva ${tipo === 'TAREA' ? 'tarea' : 'auditoría'} programada en el calendario.`, { evento_id: insertados[0].id });
+          `Nueva ${tipo === 'TAREA' ? 'tarea' : 'auditoría'} programada en el calendario.`, { evento_id: insertados[0].id },
+          tipo === 'TAREA' ? 'ASIGNACION_TAREA' : 'ASIGNACION_AUDITORIA');
       }
       res.status(201).json({ creados: insertados.length });
     } catch (err) {
@@ -378,7 +379,7 @@ module.exports = function registrarRutasCalendario(app) {
         await crearNotificacion(responsable_user_id, 'ASIGNACION',
           insertados.length === 1 ? `Te asignaron: ${tituloFinal}` : `Tarea recurrente asignada: ${tituloFinal}`,
           insertados.length === 1 ? 'Nueva tarea programada en el calendario.' : `Se programaron ${insertados.length} ocurrencias en el calendario.`,
-          { evento_ids: insertados.map((r) => r.id) });
+          { evento_ids: insertados.map((r) => r.id) }, 'ASIGNACION_TAREA');
       }
       res.status(201).json({ creados: insertados.length, ventanaSinFin: !fecha_hasta ? DIAS_VENTANA_SIN_FIN : null });
     } catch (err) {
@@ -621,7 +622,7 @@ module.exports = function registrarRutasCalendario(app) {
         await crearNotificacion(usuarioId, 'TURNOS_ASIGNADOS',
           eventoIds.length === 1 ? 'Turno asignado' : 'Turnos asignados',
           eventoIds.length === 1 ? 'Ya podés ver tu turno asignado en el calendario.' : `Se te asignaron ${eventoIds.length} turnos.`,
-          { evento_ids: eventoIds });
+          { evento_ids: eventoIds }, 'TURNOS_ASIGNADOS');
         await db.query('UPDATE schedule_events SET notificado_en = now() WHERE id = ANY($1)', [eventoIds]);
         notificados.push({ usuario_id: usuarioId, nombre, evento_ids: eventoIds });
       } catch (err) {

@@ -18,8 +18,26 @@ async function empujarPushSeguro(fn) {
   try { await fn(); } catch (err) { console.error('[push] error:', err.message); }
 }
 
-async function crearNotificacion(usuarioId, tipo, titulo, cuerpo, payload) {
+// Usuarios que apagaron explícitamente esta preferencia (falta de fila =
+// habilitado por default, ver notificacion-preferencias.js) - un solo query
+// por lote en vez de uno por usuario.
+async function usuariosConPreferenciaDeshabilitada(usuarioIds, preferenciaTipo) {
+  if (!preferenciaTipo || !usuarioIds.length) return new Set();
+  const { rows } = await db.query(
+    'SELECT usuario_id FROM notificacion_preferencias WHERE usuario_id = ANY($1) AND tipo = $2 AND habilitado = false',
+    [usuarioIds, preferenciaTipo]
+  );
+  return new Set(rows.map((r) => r.usuario_id));
+}
+
+// `preferenciaTipo` (opcional) es la clave de notificacion_preferencias que
+// gatea esta notificación (ej. 'ASIGNACION_TAREA') - no confundir con
+// `tipo`, que es el tipo de la fila en `notificaciones` (ej. 'ASIGNACION').
+// Se omite en tipos que no tienen preferencia configurable (ej. solicitud de
+// revisión de turno), que siempre se disparan.
+async function crearNotificacion(usuarioId, tipo, titulo, cuerpo, payload, preferenciaTipo) {
   if (!usuarioId) return;
+  if (preferenciaTipo && (await usuariosConPreferenciaDeshabilitada([usuarioId], preferenciaTipo)).has(usuarioId)) return;
   await db.query(
     'INSERT INTO notificaciones (usuario_id, tipo, titulo, cuerpo, payload_json) VALUES ($1,$2,$3,$4,$5)',
     [usuarioId, tipo, titulo, cuerpo || null, payload ? JSON.stringify(payload) : null]
@@ -27,9 +45,14 @@ async function crearNotificacion(usuarioId, tipo, titulo, cuerpo, payload) {
   await empujarPushSeguro(() => enviarPush(usuarioId, { titulo, cuerpo, tipo, ...payload }));
 }
 
-async function crearNotificaciones(usuarioIds, tipo, titulo, cuerpo, payload) {
-  const ids = [...new Set(usuarioIds.filter(Boolean))];
+async function crearNotificaciones(usuarioIds, tipo, titulo, cuerpo, payload, preferenciaTipo) {
+  let ids = [...new Set(usuarioIds.filter(Boolean))];
   if (!ids.length) return;
+  if (preferenciaTipo) {
+    const deshabilitados = await usuariosConPreferenciaDeshabilitada(ids, preferenciaTipo);
+    ids = ids.filter((id) => !deshabilitados.has(id));
+    if (!ids.length) return;
+  }
   const filas = ids.map((id) => [id, tipo, titulo, cuerpo || null, payload ? JSON.stringify(payload) : null]);
   await db.bulkInsert(db.pool, 'notificaciones', ['usuario_id', 'tipo', 'titulo', 'cuerpo', 'payload_json'], filas);
   await empujarPushSeguro(() => enviarPushMultiple(ids, { titulo, cuerpo, tipo, ...payload }));
