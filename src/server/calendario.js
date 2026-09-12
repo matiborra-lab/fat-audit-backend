@@ -182,6 +182,7 @@ module.exports = function registrarRutasCalendario(app) {
     let sql = `SELECT e.*, s.nombre AS sucursal_nombre, u.nombre AS responsable_nombre,
                       cu.nombre AS creado_por_nombre,
                       t.nombre AS plantilla_nombre, t.tipo AS plantilla_tipo,
+                      tt.icono AS tipo_tarea_icono,
                       CASE
                         WHEN e.estado != 'PENDIENTE' THEN e.estado
                         WHEN e.tipo = 'TAREA' AND e.hora_definida AND now() > e.fecha_hora + interval '12 hours' THEN 'DEMORADA'
@@ -194,6 +195,8 @@ module.exports = function registrarRutasCalendario(app) {
                LEFT JOIN usuarios u ON u.id = e.responsable_user_id
                LEFT JOIN usuarios cu ON cu.id = e.creado_por
                LEFT JOIN audit_templates t ON t.id = e.template_id
+               LEFT JOIN tareas_catalogo tc ON tc.id = e.tarea_catalogo_id
+               LEFT JOIN tipos_tarea tt ON tt.id = tc.tipo_tarea_id
                WHERE 1=1`;
     let params = [];
     if (req.usuario.rol === 'COLABORADOR') {
@@ -236,10 +239,10 @@ module.exports = function registrarRutasCalendario(app) {
 
     // Evento especial (feriado/promo): sin plantilla, alcance de una sucursal,
     // varias elegidas a mano, o todas a la vez (una fila por sucursal,
-    // agrupadas en una serie), responsable opcional, sin recurrencia - solo
-    // Admin/Auditor lo crean.
+    // agrupadas en una serie), responsable opcional, sin recurrencia, ícono
+    // elegido del banco (default 🎉) - solo Admin lo crea.
     if (tipo === 'EVENTO_ESPECIAL') {
-      if (req.usuario.rol !== 'ADMIN' && req.usuario.rol !== 'AUDITOR') return res.status(403).json({ error: 'Solo Administrador o Auditor pueden crear un evento especial' });
+      if (req.usuario.rol !== 'ADMIN') return res.status(403).json({ error: 'Solo Administrador puede crear un evento especial' });
       if (!titulo) return res.status(400).json({ error: 'Falta el título' });
       try {
         let sucursalIds;
@@ -252,9 +255,10 @@ module.exports = function registrarRutasCalendario(app) {
           if (!sucursal_id) return res.status(400).json({ error: 'Falta sucursal_id, sucursal_ids o todas_sucursales' });
           sucursalIds = [Number(sucursal_id)];
         }
-        const filas = sucursalIds.map((sId) => [sId, 'EVENTO_ESPECIAL', titulo, descripcion || null, responsable_user_id || null, fecha_hora, req.usuario.usuarioId]);
+        const icono = req.body.icono || '🎉';
+        const filas = sucursalIds.map((sId) => [sId, 'EVENTO_ESPECIAL', titulo, descripcion || null, responsable_user_id || null, fecha_hora, req.usuario.usuarioId, icono]);
         const insertados = await db.bulkInsert(db.pool, 'schedule_events',
-          ['sucursal_id', 'tipo', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'creado_por'],
+          ['sucursal_id', 'tipo', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'creado_por', 'icono'],
           filas, 'id');
         const serieId = insertados[0].id;
         await db.query('UPDATE schedule_events SET serie_id = $1 WHERE id = ANY($2)', [serieId, insertados.map((r) => r.id)]);

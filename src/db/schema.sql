@@ -285,6 +285,8 @@ CREATE TABLE schedule_events (
                                               -- con "Asignar turnos" (default true para no afectar otros tipos)
   notificado_en         TIMESTAMPTZ,         -- solo TURNO: cuando se le aviso al responsable por ultima vez -
                                               -- permite reintentar si la notificacion fallo (ver calendario.js)
+  icono                 TEXT,                -- solo EVENTO_ESPECIAL: emoji elegido del banco (default 🎉) - el resto
+                                              -- de los tipos usan un ícono fijo por tipo, ver TIPO_ICONO en el frontend
   creado_por            INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
   creado_en             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
@@ -300,6 +302,7 @@ CREATE TABLE tipos_tarea (
   nombre   TEXT NOT NULL,
   orden    INTEGER NOT NULL DEFAULT 0,
   activo   BOOLEAN NOT NULL DEFAULT true,
+  icono    TEXT,                          -- emoji del banco (ver BANCO_EMOJIS) - fallback 📝 en la app si no se eligió
   creado_en TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE tareas_catalogo (

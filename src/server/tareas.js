@@ -78,8 +78,8 @@ module.exports = function registrarRutasTareas(app) {
     try {
       const { rows: max } = await db.query('SELECT COALESCE(MAX(orden), -1) + 1 AS siguiente FROM tipos_tarea');
       const { rows } = await db.query(
-        'INSERT INTO tipos_tarea (nombre, orden) VALUES ($1,$2) RETURNING *',
-        [nombre, max[0].siguiente]
+        'INSERT INTO tipos_tarea (nombre, orden, icono) VALUES ($1,$2,$3) RETURNING *',
+        [nombre, max[0].siguiente, req.body.icono || null]
       );
       res.status(201).json(rows[0]);
     } catch (err) {
@@ -88,12 +88,13 @@ module.exports = function registrarRutasTareas(app) {
   });
 
   app.patch('/api/tipos-tarea/:id', requireAdmin, async (req, res) => {
-    const { nombre, orden, activo } = req.body;
+    const { nombre, orden, activo, icono } = req.body;
     try {
       const { rows } = await db.query(
-        `UPDATE tipos_tarea SET nombre = COALESCE($1,nombre), orden = COALESCE($2,orden), activo = COALESCE($3,activo)
+        `UPDATE tipos_tarea SET nombre = COALESCE($1,nombre), orden = COALESCE($2,orden), activo = COALESCE($3,activo),
+         icono = COALESCE($5,icono)
          WHERE id = $4 RETURNING *`,
-        [nombre ?? null, orden ?? null, activo ?? null, req.params.id]
+        [nombre ?? null, orden ?? null, activo ?? null, req.params.id, icono ?? null]
       );
       if (!rows[0]) return res.status(404).json({ error: 'Tipo de tarea no encontrado' });
       res.json(rows[0]);
