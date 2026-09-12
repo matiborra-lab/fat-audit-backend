@@ -483,28 +483,31 @@ app.patch('/api/admin/usuarios/:id', requireAdminOGerente, async (req, res) => {
       if (req.body.usuario && !USUARIO_REGEX.test(req.body.usuario)) {
         return res.status(400).json({ error: 'El nombre de usuario tiene que tener 3-30 caracteres (letras, numeros, puntos, guiones)' });
       }
+      if (req.body.email && !EMAIL_REGEX.test(req.body.email)) return res.status(400).json({ error: 'El email no es valido' });
       const { rows } = await db.query(
         `UPDATE usuarios SET nombre = COALESCE($1,nombre), puesto = COALESCE($2,puesto), activo = COALESCE($3,activo),
-         usuario = COALESCE($5,usuario), fecha_nacimiento = COALESCE($6,fecha_nacimiento)
+         usuario = COALESCE($5,usuario), fecha_nacimiento = COALESCE($6,fecha_nacimiento), email = COALESCE($7,email)
          WHERE id = $4 RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento, activo`,
-        [req.body.nombre ?? null, req.body.puesto ?? null, req.body.activo ?? null, req.params.id, req.body.usuario ? req.body.usuario.trim() : null, req.body.fecha_nacimiento ?? null]
+        [req.body.nombre ?? null, req.body.puesto ?? null, req.body.activo ?? null, req.params.id, req.body.usuario ? req.body.usuario.trim() : null, req.body.fecha_nacimiento ?? null, req.body.email ? String(req.body.email).toLowerCase().trim() : null]
       );
       return res.json(rows[0]);
     }
 
-    const { rol, sucursal_id, activo, nombre, puesto, usuario: nombreUsuario, fecha_nacimiento } = req.body;
+    const { rol, sucursal_id, activo, nombre, puesto, usuario: nombreUsuario, fecha_nacimiento, email } = req.body;
     if (rol !== undefined && !ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol invalido' });
     if (rol === 'GERENTE' && sucursal_id === undefined) return res.status(400).json({ error: 'Un gerente necesita una sucursal asignada' });
     if (rol === 'COLABORADOR' && sucursal_id === undefined) return res.status(400).json({ error: 'Un colaborador necesita una sucursal asignada' });
     if (rol === 'COLABORADOR' && puesto !== undefined && !PUESTOS_VALIDOS.includes(puesto)) return res.status(400).json({ error: 'Puesto inválido: ' + PUESTOS_VALIDOS.join(', ') });
     if (nombreUsuario && !USUARIO_REGEX.test(nombreUsuario)) return res.status(400).json({ error: 'El nombre de usuario tiene que tener 3-30 caracteres (letras, numeros, puntos, guiones)' });
+    if (email && !EMAIL_REGEX.test(email)) return res.status(400).json({ error: 'El email no es valido' });
     const { rows } = await db.query(
       `UPDATE usuarios SET rol = COALESCE($1,rol), nombre = COALESCE($2,nombre),
        sucursal_id = CASE WHEN $1 IN ('GERENTE','COLABORADOR') THEN $3 WHEN $1 IS NOT NULL THEN NULL ELSE sucursal_id END,
        puesto = CASE WHEN $1 = 'COLABORADOR' THEN COALESCE($6,puesto) WHEN $1 IS NOT NULL THEN NULL ELSE puesto END,
-       activo = COALESCE($4,activo), usuario = COALESCE($7,usuario), fecha_nacimiento = COALESCE($8,fecha_nacimiento)
+       activo = COALESCE($4,activo), usuario = COALESCE($7,usuario), fecha_nacimiento = COALESCE($8,fecha_nacimiento),
+       email = COALESCE($9,email)
        WHERE id = $5 RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento, activo`,
-      [rol ?? null, nombre ?? null, sucursal_id ?? null, activo ?? null, req.params.id, puesto ?? null, nombreUsuario ? nombreUsuario.trim() : null, fecha_nacimiento ?? null]
+      [rol ?? null, nombre ?? null, sucursal_id ?? null, activo ?? null, req.params.id, puesto ?? null, nombreUsuario ? nombreUsuario.trim() : null, fecha_nacimiento ?? null, email ? String(email).toLowerCase().trim() : null]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
     res.json(rows[0]);
