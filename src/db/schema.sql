@@ -45,6 +45,8 @@ CREATE TABLE usuarios (
                                           -- obligatorio (a nivel app) cuando rol = 'GERENTE' o 'COLABORADOR'
   puesto        TEXT CHECK (puesto IN ('COCINA', 'CAJA', 'REFUERZO_COCINA')),
                                           -- obligatorio (a nivel app) solo cuando rol = 'COLABORADOR'
+  fecha_nacimiento DATE,                 -- opcional, solo Gerente/Colaborador - agrega su cumpleaños como
+                                          -- fecha especial recurrente en el calendario de su sucursal
   activo            BOOLEAN NOT NULL DEFAULT true,
   eliminado_en      TIMESTAMPTZ,             -- soft-delete, igual criterio que COTEJA: nunca se borra la fila
   ultimo_login      TIMESTAMPTZ,

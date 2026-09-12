@@ -258,6 +258,35 @@ app.get('/api/sucursales/:id/clima', async (req, res) => {
   }
 });
 
+// Cumpleaños de Gerente/Colaborador de una sucursal, como fecha especial
+// recurrente en su calendario - fecha recalculada al año pedido (default el
+// actual). Array vacío si nadie tiene fecha_nacimiento cargada.
+app.get('/api/sucursales/:id/cumpleanos', async (req, res) => {
+  if (!puedeAccederSucursal(req.usuario, req.params.id)) return res.status(403).json({ error: 'No tenés acceso a esa sucursal' });
+  const anio = Number(req.query.anio) || new Date().getFullYear();
+  try {
+    const { rows } = await db.query(
+      `SELECT id AS usuario_id, nombre, email, fecha_nacimiento
+       FROM usuarios
+       WHERE sucursal_id = $1 AND activo = true AND rol IN ('GERENTE','COLABORADOR') AND fecha_nacimiento IS NOT NULL`,
+      [req.params.id]
+    );
+    // Se recalcula la fecha en JS (no con make_date en SQL) para poder
+    // correr un 29/feb al 28 en un año no bisiesto sin que eso rompa toda
+    // la consulta (make_date tira error ante una fecha inválida).
+    const bisiesto = (anio % 4 === 0 && anio % 100 !== 0) || anio % 400 === 0;
+    const resultado = rows.map((u) => {
+      const fn = new Date(u.fecha_nacimiento);
+      const mes = fn.getUTCMonth();
+      const dia = mes === 1 && fn.getUTCDate() === 29 && !bisiesto ? 28 : fn.getUTCDate();
+      return { usuario_id: u.usuario_id, nombre: u.nombre, email: u.email, fecha: `${anio}-${String(mes + 1).padStart(2, '0')}-${String(dia).padStart(2, '0')}` };
+    });
+    res.json(resultado);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // Feriados nacionales/trasladables/puentes (ArgentinaDatos, cacheados en la
 // tabla feriados) - no son de una sucursal en particular, cualquier usuario
 // autenticado los puede ver.
@@ -355,7 +384,11 @@ app.put('/api/sucursales/:id/horario-turnos', async (req, res) => {
 
 app.get('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
   try {
+    // to_char en fecha_nacimiento - una columna DATE cruda serializa como
+    // timestamp completo via pg/JSON, y el frontend la usa tal cual en un
+    // <input type="date"> (mismo ajuste que GET /api/feriados).
     let sql = `SELECT u.id, u.email, u.usuario, u.nombre, u.rol, u.sucursal_id, s.nombre AS sucursal_nombre, u.puesto,
+              to_char(u.fecha_nacimiento, 'YYYY-MM-DD') AS fecha_nacimiento,
               u.activo, u.eliminado_en, u.ultimo_login, u.ultima_actividad_en, u.creado_en, (u.password_hash IS NOT NULL) AS clave_definida
        FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id WHERE 1=1`;
     const params = [];
@@ -377,7 +410,7 @@ app.get('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
 });
 
 app.post('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
-  let { email, usuario: nombreUsuario, nombre, rol, sucursal_id, puesto } = req.body;
+  let { email, usuario: nombreUsuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento } = req.body;
   if (!email || !EMAIL_REGEX.test(email)) return res.status(400).json({ error: 'El email no es valido' });
   if (nombreUsuario && !USUARIO_REGEX.test(nombreUsuario)) return res.status(400).json({ error: 'El nombre de usuario tiene que tener 3-30 caracteres (letras, numeros, puntos, guiones)' });
 
@@ -394,9 +427,9 @@ app.post('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      `INSERT INTO usuarios (email, usuario, nombre, rol, sucursal_id, puesto) VALUES ($1,$2,$3,$4,$5,$6)
-       RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, activo, creado_en`,
-      [String(email).toLowerCase().trim(), nombreUsuario ? nombreUsuario.trim() : null, nombre || null, rol, (rol === 'GERENTE' || rol === 'COLABORADOR') ? sucursal_id : null, rol === 'COLABORADOR' ? puesto : null]
+      `INSERT INTO usuarios (email, usuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento) VALUES ($1,$2,$3,$4,$5,$6,$7)
+       RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento, activo, creado_en`,
+      [String(email).toLowerCase().trim(), nombreUsuario ? nombreUsuario.trim() : null, nombre || null, rol, (rol === 'GERENTE' || rol === 'COLABORADOR') ? sucursal_id : null, rol === 'COLABORADOR' ? puesto : null, fecha_nacimiento || null]
     );
     const usuario = rows[0];
     try {
@@ -442,14 +475,14 @@ app.patch('/api/admin/usuarios/:id', requireAdminOGerente, async (req, res) => {
       }
       const { rows } = await db.query(
         `UPDATE usuarios SET nombre = COALESCE($1,nombre), puesto = COALESCE($2,puesto), activo = COALESCE($3,activo),
-         usuario = COALESCE($5,usuario)
-         WHERE id = $4 RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, activo`,
-        [req.body.nombre ?? null, req.body.puesto ?? null, req.body.activo ?? null, req.params.id, req.body.usuario ? req.body.usuario.trim() : null]
+         usuario = COALESCE($5,usuario), fecha_nacimiento = COALESCE($6,fecha_nacimiento)
+         WHERE id = $4 RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento, activo`,
+        [req.body.nombre ?? null, req.body.puesto ?? null, req.body.activo ?? null, req.params.id, req.body.usuario ? req.body.usuario.trim() : null, req.body.fecha_nacimiento ?? null]
       );
       return res.json(rows[0]);
     }
 
-    const { rol, sucursal_id, activo, nombre, puesto, usuario: nombreUsuario } = req.body;
+    const { rol, sucursal_id, activo, nombre, puesto, usuario: nombreUsuario, fecha_nacimiento } = req.body;
     if (rol !== undefined && !ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol invalido' });
     if (rol === 'GERENTE' && sucursal_id === undefined) return res.status(400).json({ error: 'Un gerente necesita una sucursal asignada' });
     if (rol === 'COLABORADOR' && sucursal_id === undefined) return res.status(400).json({ error: 'Un colaborador necesita una sucursal asignada' });
@@ -459,9 +492,9 @@ app.patch('/api/admin/usuarios/:id', requireAdminOGerente, async (req, res) => {
       `UPDATE usuarios SET rol = COALESCE($1,rol), nombre = COALESCE($2,nombre),
        sucursal_id = CASE WHEN $1 IN ('GERENTE','COLABORADOR') THEN $3 WHEN $1 IS NOT NULL THEN NULL ELSE sucursal_id END,
        puesto = CASE WHEN $1 = 'COLABORADOR' THEN COALESCE($6,puesto) WHEN $1 IS NOT NULL THEN NULL ELSE puesto END,
-       activo = COALESCE($4,activo), usuario = COALESCE($7,usuario)
-       WHERE id = $5 RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, activo`,
-      [rol ?? null, nombre ?? null, sucursal_id ?? null, activo ?? null, req.params.id, puesto ?? null, nombreUsuario ? nombreUsuario.trim() : null]
+       activo = COALESCE($4,activo), usuario = COALESCE($7,usuario), fecha_nacimiento = COALESCE($8,fecha_nacimiento)
+       WHERE id = $5 RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento, activo`,
+      [rol ?? null, nombre ?? null, sucursal_id ?? null, activo ?? null, req.params.id, puesto ?? null, nombreUsuario ? nombreUsuario.trim() : null, fecha_nacimiento ?? null]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
     res.json(rows[0]);
