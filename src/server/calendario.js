@@ -180,11 +180,19 @@ module.exports = function registrarRutasCalendario(app) {
   app.get('/api/calendario', async (req, res) => {
     const { desde, hasta, sucursal_id, tipo, estado, responsable_id } = req.query;
     let sql = `SELECT e.*, s.nombre AS sucursal_nombre, u.nombre AS responsable_nombre,
+                      cu.nombre AS creado_por_nombre,
                       t.nombre AS plantilla_nombre, t.tipo AS plantilla_tipo,
-                      CASE WHEN e.estado = 'PENDIENTE' AND e.fecha_hora < now() THEN 'VENCIDA' ELSE e.estado END AS estado_efectivo
+                      CASE
+                        WHEN e.estado != 'PENDIENTE' THEN e.estado
+                        WHEN e.tipo = 'TAREA' AND e.hora_definida AND now() > e.fecha_hora + interval '12 hours' THEN 'DEMORADA'
+                        WHEN e.tipo = 'TAREA' AND NOT e.hora_definida AND now() > date_trunc('day', e.fecha_hora) + interval '1 day' THEN 'DEMORADA'
+                        WHEN e.tipo != 'TAREA' AND e.fecha_hora < now() THEN 'VENCIDA'
+                        ELSE e.estado
+                      END AS estado_efectivo
                FROM schedule_events e
                JOIN sucursales s ON s.id = e.sucursal_id
                LEFT JOIN usuarios u ON u.id = e.responsable_user_id
+               LEFT JOIN usuarios cu ON cu.id = e.creado_por
                LEFT JOIN audit_templates t ON t.id = e.template_id
                WHERE 1=1`;
     let params = [];
@@ -434,11 +442,17 @@ module.exports = function registrarRutasCalendario(app) {
   });
 
   // Cumplimiento de una TAREA: { comentario, evidencia_url, evidencia_tipo }.
+  // No se puede marcar cumplida antes de la fecha/hora programada (para una
+  // tarea sin horario, fecha_hora queda al inicio de ese día - ver
+  // hora_definida - así que esto la habilita apenas empieza el día). Si la
+  // tarea exige evidencia (ver evidencia_obligatoria), la foto es obligatoria.
   app.post('/api/calendario/:id/completar', async (req, res) => {
     const evento = await obtenerEventoOForbidden(req, res);
     if (!evento) return;
     if (evento.tipo !== 'TAREA') return res.status(400).json({ error: 'Solo las tareas se completan así - una auditoría se inicia con /iniciar' });
+    if (new Date(evento.fecha_hora) > new Date()) return res.status(400).json({ error: 'Todavía no se puede marcar cumplida - no llegó la fecha/hora programada' });
     const { comentario, evidencia_url, evidencia_tipo } = req.body;
+    if (evento.evidencia_obligatoria && !evidencia_url) return res.status(400).json({ error: 'Esta tarea requiere una foto de evidencia' });
     try {
       const { rows } = await db.query(
         `UPDATE schedule_events SET estado = 'COMPLETADA', completado_en = now(), completado_por = $1,
