@@ -178,11 +178,11 @@ async function validarResponsablePermitido(usuarioCreador, responsableUserId) {
 
 module.exports = function registrarRutasCalendario(app) {
   app.get('/api/calendario', async (req, res) => {
-    const { desde, hasta, sucursal_id, tipo, estado, responsable_id } = req.query;
+    const { desde, hasta, sucursal_id, tipo, estado, responsable_id, tipo_tarea_id } = req.query;
     let sql = `SELECT e.*, s.nombre AS sucursal_nombre, u.nombre AS responsable_nombre,
                       cu.nombre AS creado_por_nombre,
                       t.nombre AS plantilla_nombre, t.tipo AS plantilla_tipo,
-                      tt.icono AS tipo_tarea_icono,
+                      tt.id AS tipo_tarea_id, tt.nombre AS tipo_tarea_nombre, tt.icono AS tipo_tarea_icono,
                       CASE
                         WHEN e.estado != 'PENDIENTE' THEN e.estado
                         WHEN e.tipo = 'TAREA' AND e.hora_definida AND now() > e.fecha_hora + interval '12 hours' THEN 'DEMORADA'
@@ -219,6 +219,9 @@ module.exports = function registrarRutasCalendario(app) {
     if (tipo) { params.push(String(tipo).split(',')); sql += ` AND e.tipo = ANY($${params.length})`; }
     if (estado) { params.push(estado); sql += ` AND e.estado = $${params.length}`; }
     if (responsable_id) { params.push(responsable_id); sql += ` AND e.responsable_user_id = $${params.length}`; }
+    // Filtro de "tipo de tarea" del catálogo (Limpieza, etc.) - distinto de
+    // `tipo` (AUDITORIA/TAREA/...), se usa en el historial de Tareas.
+    if (tipo_tarea_id) { params.push(String(tipo_tarea_id).split(',').map(Number)); sql += ` AND tt.id = ANY($${params.length})`; }
     sql += ' ORDER BY e.fecha_hora';
     try {
       const { rows } = await db.query(sql, params);
