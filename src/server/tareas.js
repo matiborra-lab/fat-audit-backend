@@ -78,8 +78,8 @@ module.exports = function registrarRutasTareas(app) {
     try {
       const { rows: max } = await db.query('SELECT COALESCE(MAX(orden), -1) + 1 AS siguiente FROM tipos_tarea');
       const { rows } = await db.query(
-        'INSERT INTO tipos_tarea (nombre, orden, icono) VALUES ($1,$2,$3) RETURNING *',
-        [nombre, max[0].siguiente, req.body.icono || null]
+        'INSERT INTO tipos_tarea (nombre, orden, icono, descripcion, enlace, enlace_nombre) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
+        [nombre, max[0].siguiente, req.body.icono || null, req.body.descripcion || null, req.body.enlace || null, req.body.enlace_nombre || null]
       );
       res.status(201).json(rows[0]);
     } catch (err) {
@@ -87,14 +87,29 @@ module.exports = function registrarRutasTareas(app) {
     }
   });
 
+  // Update dinámico en vez de COALESCE: distintos callers mandan distintos
+  // subconjuntos de campos (alternarTipoActivo solo manda `activo`, el modal
+  // de edición manda todo el form) - con COALESCE un campo opcional vacío
+  // (descripcion/enlace/enlace_nombre) nunca se podría limpiar sin también
+  // arriesgarse a que un PATCH parcial (como el toggle de activo) borre esos
+  // campos sin querer. Acá solo se toca una columna si su clave vino en el body.
   app.patch('/api/tipos-tarea/:id', requireAdmin, async (req, res) => {
-    const { nombre, orden, activo, icono } = req.body;
+    const campos = [];
+    const params = [];
+    function set(columna, valor) { params.push(valor); campos.push(`${columna} = $${params.length}`); }
+    if (req.body.nombre !== undefined) set('nombre', req.body.nombre);
+    if (req.body.orden !== undefined) set('orden', req.body.orden);
+    if (req.body.activo !== undefined) set('activo', req.body.activo);
+    if (req.body.icono !== undefined) set('icono', req.body.icono || null);
+    if (req.body.descripcion !== undefined) set('descripcion', req.body.descripcion || null);
+    if (req.body.enlace !== undefined) set('enlace', req.body.enlace || null);
+    if (req.body.enlace_nombre !== undefined) set('enlace_nombre', req.body.enlace_nombre || null);
+    if (!campos.length) return res.status(400).json({ error: 'Nada para actualizar' });
+    params.push(req.params.id);
     try {
       const { rows } = await db.query(
-        `UPDATE tipos_tarea SET nombre = COALESCE($1,nombre), orden = COALESCE($2,orden), activo = COALESCE($3,activo),
-         icono = COALESCE($5,icono)
-         WHERE id = $4 RETURNING *`,
-        [nombre ?? null, orden ?? null, activo ?? null, req.params.id, icono ?? null]
+        `UPDATE tipos_tarea SET ${campos.join(', ')} WHERE id = $${params.length} RETURNING *`,
+        params
       );
       if (!rows[0]) return res.status(404).json({ error: 'Tipo de tarea no encontrado' });
       res.json(rows[0]);

@@ -302,7 +302,10 @@ CREATE TABLE tipos_tarea (
   nombre   TEXT NOT NULL,
   orden    INTEGER NOT NULL DEFAULT 0,
   activo   BOOLEAN NOT NULL DEFAULT true,
-  icono    TEXT,                          -- emoji del banco (ver BANCO_EMOJIS) - fallback 📝 en la app si no se eligió
+  icono    TEXT,                          -- cualquier emoji (catálogo completo, ver SelectorEmojiCatalogo) - fallback 📝 en la app si no se eligió
+  descripcion TEXT,                       -- opcional, se muestra al completar una tarea de este tipo
+  enlace   TEXT,                          -- opcional, ej. tutorial o ecommerce del proveedor
+  enlace_nombre TEXT,                     -- opcional, texto del botón - fallback "Ver página" en la app
   creado_en TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE tareas_catalogo (
