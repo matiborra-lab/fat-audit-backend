@@ -45,9 +45,13 @@ module.exports = function registrarRutasHistorial(app) {
     try {
       let sucursalesSql = 'SELECT id, nombre FROM sucursales WHERE activo = true';
       let params = [];
-      if (req.usuario.rol === 'GERENTE') {
-        const scoped = scopeSucursal(req.usuario, 'id', params);
-        sucursalesSql += scoped.sql; params = scoped.params;
+      // Gerente y Colaborador son roles de UNA sola sucursal - se fuerza la
+      // suya sin confiar en ningun sucursal_id que manden (mismo criterio
+      // que scopeSucursal, pero escrito acá porque ese helper solo cubre
+      // Gerente y no queremos tocar sus otros usos). Admin/Auditor pueden
+      // filtrar opcionalmente o ver todas.
+      if (req.usuario.rol === 'GERENTE' || req.usuario.rol === 'COLABORADOR') {
+        params.push(req.usuario.sucursal_id); sucursalesSql += ` AND id = $${params.length}`;
       } else if (req.query.sucursal_id) {
         params.push(req.query.sucursal_id); sucursalesSql += ` AND id = $${params.length}`;
       }
@@ -55,13 +59,15 @@ module.exports = function registrarRutasHistorial(app) {
       const sucursalIds = sucursales.map((s) => s.id);
       if (sucursalIds.length === 0) return res.json({ ranking: [], sucursales: [] });
 
-      // Ultima auditoria completada por sucursal + la anterior (para tendencia),
-      // con una sola query (rn=1 -> ultima, rn=2 -> anterior).
+      // Ultima auditoria de MARCA completada por sucursal + la anterior (para
+      // tendencia), con una sola query (rn=1 -> ultima, rn=2 -> anterior).
+      // Solo MARCA: una auditoria interna (autoevaluacion del Gerente) no
+      // tiene que poder mejorar/empeorar el puntaje "oficial" que se muestra acá.
       const { rows: conRn } = await db.query(
         `SELECT * FROM (
            SELECT id, sucursal_id, tipo, puntaje_total, semaforo, resultado, completada_en, detalle_calculo,
                   ROW_NUMBER() OVER (PARTITION BY sucursal_id ORDER BY completada_en DESC) AS rn
-           FROM audit_runs WHERE sucursal_id = ANY($1) AND estado = 'COMPLETADA'
+           FROM audit_runs WHERE sucursal_id = ANY($1) AND estado = 'COMPLETADA' AND tipo = 'MARCA'
          ) x WHERE rn <= 2`,
         [sucursalIds]
       );
@@ -89,13 +95,14 @@ module.exports = function registrarRutasHistorial(app) {
         };
       }).sort((a, b) => (b.puntaje_total ?? -1) - (a.puntaje_total ?? -1));
 
-      // Últimas 10 auditorías completadas en el alcance actual - alimenta el
-      // gráfico de "resultado general de cada auditoría" (ver Dashboard.jsx).
+      // Últimas 10 auditorías de MARCA completadas en el alcance actual -
+      // alimenta el gráfico de "resultado general" y el promedio por área
+      // (ver Dashboard.jsx) - mismo criterio que arriba, sin auditorías internas.
       const { rows: ultimasAuditorias } = await db.query(
         `SELECT r.id, r.sucursal_id, s.nombre AS sucursal_nombre, r.tipo, r.completada_en,
                 r.puntaje_total, r.semaforo, r.resultado, r.detalle_calculo
          FROM audit_runs r JOIN sucursales s ON s.id = r.sucursal_id
-         WHERE r.sucursal_id = ANY($1) AND r.estado = 'COMPLETADA'
+         WHERE r.sucursal_id = ANY($1) AND r.estado = 'COMPLETADA' AND r.tipo = 'MARCA'
          ORDER BY r.completada_en DESC LIMIT 10`,
         [sucursalIds]
       );
