@@ -16,6 +16,13 @@ if (process.env.RESEND_API_KEY) {
 // un informe de auditoría (ver src/pdf).
 async function enviarMail({ to, subject, html, attachments }) {
   if (!resend) {
+    // En producción esto NO debe pasar desapercibido: sin RESEND_API_KEY el
+    // mail nunca sale, pero antes esta función devolvía éxito igual y el
+    // caller (invitación/reset de clave) mostraba "mail enviado" sin que
+    // llegara nada. Acá se corta con un error real para que se note.
+    if (process.env.NODE_ENV === 'production') {
+      throw new Error('RESEND_API_KEY no está configurada en este entorno - el mail no se pudo enviar');
+    }
     console.log(`[mailer] RESEND_API_KEY no configurada - mail simulado a ${to}:\n  Asunto: ${subject}\n  ${html}${attachments ? `\n  Adjuntos: ${attachments.map((a) => a.filename).join(', ')}` : ''}`);
     return;
   }

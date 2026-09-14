@@ -57,7 +57,9 @@ app.get('/health/db', async (req, res) => {
 });
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const USUARIO_REGEX = /^[a-zA-Z0-9._-]{3,30}$/;
+// \p{L} (letra Unicode) en vez de a-zA-Z para admitir ñ/acentos en nombres
+// de usuario - antes rechazaba "Muñoz" o cualquier nombre con tildes.
+const USUARIO_REGEX = /^[\p{L}0-9._-]{3,30}$/u;
 const ROLES_VALIDOS = ['ADMIN', 'AUDITOR', 'GERENTE', 'COLABORADOR'];
 const PUESTOS_VALIDOS = ['COCINA', 'CAJA', 'REFUERZO_COCINA'];
 
@@ -476,6 +478,9 @@ app.patch('/api/admin/usuarios/:id', requireAdminOGerente, async (req, res) => {
       }
       if (req.body.rol !== undefined || req.body.sucursal_id !== undefined) {
         return res.status(403).json({ error: 'Un gerente no puede cambiar el rol ni la sucursal de un colaborador' });
+      }
+      if (req.body.activo !== undefined) {
+        return res.status(403).json({ error: 'Solo un administrador puede eliminar o reactivar usuarios' });
       }
       if (req.body.puesto !== undefined && !PUESTOS_VALIDOS.includes(req.body.puesto)) {
         return res.status(400).json({ error: 'Puesto inválido: ' + PUESTOS_VALIDOS.join(', ') });
