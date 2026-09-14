@@ -215,7 +215,11 @@ module.exports = function registrarRutasCalendario(app) {
       params.push(String(sucursal_id).split(',').map(Number)); sql += ` AND e.sucursal_id = ANY($${params.length})`;
     }
     if (desde) { params.push(desde); sql += ` AND e.fecha_hora >= $${params.length}`; }
-    if (hasta) { params.push(hasta); sql += ` AND e.fecha_hora <= $${params.length}`; }
+    // `hasta` es una fecha 'YYYY-MM-DD' sin hora - compararla con <= la
+    // interpreta como medianoche de ese día y descarta cualquier evento más
+    // tarde ese mismo día (el último de la semana/mes visible, típicamente).
+    // Con < día+1 el límite queda inclusive de todo el día.
+    if (hasta) { params.push(hasta); sql += ` AND e.fecha_hora < ($${params.length}::date + 1)`; }
     // `tipo` acepta uno o varios valores separados por coma (filtro multi-select del calendario).
     if (tipo) { params.push(String(tipo).split(',')); sql += ` AND e.tipo = ANY($${params.length})`; }
     if (estado) { params.push(estado); sql += ` AND e.estado = $${params.length}`; }

@@ -29,7 +29,9 @@ module.exports = function registrarRutasHistorial(app) {
     if (template_id) { params.push(template_id); sql += ` AND r.template_id = $${params.length}`; }
     if (estado) { params.push(estado); sql += ` AND r.estado = $${params.length}`; }
     if (desde) { params.push(desde); sql += ` AND r.creado_en >= $${params.length}`; }
-    if (hasta) { params.push(hasta); sql += ` AND r.creado_en <= $${params.length}`; }
+    // Mismo criterio que GET /api/calendario: `hasta` es una fecha sin hora,
+    // <= la trunca a medianoche y descarta lo creado más tarde ese día.
+    if (hasta) { params.push(hasta); sql += ` AND r.creado_en < ($${params.length}::date + 1)`; }
     if (puntaje_min) { params.push(Number(puntaje_min) / 100); sql += ` AND r.puntaje_total >= $${params.length}`; }
     if (puntaje_max) { params.push(Number(puntaje_max) / 100); sql += ` AND r.puntaje_total <= $${params.length}`; }
     sql += ' ORDER BY r.creado_en DESC LIMIT 200';
