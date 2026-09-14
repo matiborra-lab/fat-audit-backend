@@ -6,10 +6,16 @@
  * TODO junto con PUT /api/plantillas/:id/estructura - se borra y se
  * reinserta dentro de una transaccion, en vez de exponer un CRUD granular
  * por sector/area/item. Es mas simple y alcanza para un constructor (no es
- * edicion colaborativa en tiempo real) - y solo se permite mientras la
- * plantilla esta en BORRADOR: una plantilla PUBLICADA es inmutable (ver
- * audit_runs.estructura_snapshot, que depende de que esto nunca cambie
- * bajo una auditoria ya iniciada).
+ * edicion colaborativa en tiempo real).
+ *
+ * Una plantilla SIEMPRE se puede editar (nombre, tipo, sucursales,
+ * estructura completa), sin importar su estado (BORRADOR/PUBLICADA/
+ * ARCHIVADA) - editarla no afecta auditorias ya hechas porque cada
+ * audit_runs.estructura_snapshot es una COPIA congelada al momento de
+ * iniciar esa auditoria puntual, no una referencia viva a la plantilla.
+ * "Publicar" es solo una marca de estado (que una plantilla este
+ * disponible para elegir al arrancar una auditoria nueva), no un lock de
+ * edicion.
  */
 
 const db = require('../db');
@@ -171,7 +177,6 @@ function registrarRutasPlantillas(app) {
     try {
       const { rows: actual } = await db.query('SELECT estado FROM audit_templates WHERE id = $1', [req.params.id]);
       if (!actual[0]) return res.status(404).json({ error: 'Plantilla no encontrada' });
-      if (actual[0].estado !== 'BORRADOR') return res.status(400).json({ error: 'Solo se puede editar una plantilla en BORRADOR - crea una nueva versión' });
       const { rows } = await db.query(
         `UPDATE audit_templates SET nombre = COALESCE($1,nombre), descripcion = COALESCE($2,descripcion),
          tipo = COALESCE($3,tipo), weighting_mode = COALESCE($4,weighting_mode),
@@ -226,7 +231,6 @@ function registrarRutasPlantillas(app) {
       await client.query('BEGIN');
       const { rows: actual } = await client.query('SELECT estado FROM audit_templates WHERE id = $1 FOR UPDATE', [req.params.id]);
       if (!actual[0]) throw Object.assign(new Error('Plantilla no encontrada'), { status: 404 });
-      if (actual[0].estado !== 'BORRADOR') throw Object.assign(new Error('Solo se puede editar una plantilla en BORRADOR - crea una nueva versión'), { status: 400 });
 
       await client.query('DELETE FROM audit_sectores WHERE template_id = $1', [req.params.id]);
       await client.query('DELETE FROM audit_areas WHERE template_id = $1', [req.params.id]);
