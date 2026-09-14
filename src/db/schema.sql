@@ -257,10 +257,13 @@ CREATE TABLE schedule_events (
   titulo                TEXT NOT NULL,
   descripcion           TEXT,
   responsable_user_id   INTEGER REFERENCES usuarios(id) ON DELETE SET NULL, -- AUDITORIA/SEGUIMIENTO/TAREA: quien la hace: TURNO: el colaborador asignado
-  puesto                TEXT CHECK (puesto IN ('COCINA', 'CAJA', 'REFUERZO_COCINA')), -- solo TURNO - puede diferir
+  puesto                TEXT CHECK (puesto IN ('COCINA', 'CAJA', 'REFUERZO_COCINA')), -- TURNO: puede diferir
                                               -- del puesto de base del colaborador (usuarios.puesto): es el puesto
-                                              -- para ESE turno puntual, no cambia su perfil
-  turno_tipo            TEXT CHECK (turno_tipo IN ('DIURNO', 'NOCTURNO')), -- solo TURNO
+                                              -- para ESE turno puntual, no cambia su perfil. TAREA (solo si
+                                              -- responsable_user_id es null): junto a turno_tipo, criterio "quien
+                                              -- tenga este puesto y turno ese día" en vez de una persona fija -
+                                              -- ver resolverResponsablesTarea en calendario.js
+  turno_tipo            TEXT CHECK (turno_tipo IN ('DIURNO', 'NOCTURNO')), -- TURNO, y TAREA por criterio (ver puesto)
   fecha_hora            TIMESTAMPTZ NOT NULL,
   duracion_minutos      INTEGER,             -- TURNO: junto a fecha_hora define el "hasta" (fecha_hora + duracion)
   serie_id              INTEGER,             -- agrupa las ocurrencias de una misma recurrencia (id de la 1ra fila de la serie)

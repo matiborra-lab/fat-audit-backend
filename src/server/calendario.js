@@ -176,6 +176,28 @@ async function validarResponsablePermitido(usuarioCreador, responsableUserId) {
   }
 }
 
+// Para TAREA: arma la lista de "responsables" a cruzar con las fechas de la
+// ocurrencia (una fila por combinación fecha×responsable, mismo patrón que
+// "todas las sucursales" en EVENTO_ESPECIAL) - dos modos excluyentes:
+// - responsable_user_ids: una o más personas puntuales.
+// - responsable_puesto + responsable_turno_tipo: sin nadie fijo todavía -
+//   se resuelve solo, día a día, contra quien tenga ESE turno real
+//   (ver el bloque COLABORADOR de GET /api/calendario) - útil para una
+//   tarea recurrente donde el colaborador de ese puesto/turno va rotando.
+// Sin ninguno de los dos, cae al responsable_user_id suelto de siempre
+// (incluye "sin responsable", null).
+function resolverResponsablesTarea({ responsable_user_id, responsable_user_ids, responsable_puesto, responsable_turno_tipo }) {
+  if (Array.isArray(responsable_user_ids) && responsable_user_ids.length) {
+    return responsable_user_ids.map((id) => ({ userId: Number(id), puesto: null, turnoTipo: null }));
+  }
+  if (responsable_puesto && responsable_turno_tipo) {
+    if (!['COCINA', 'CAJA', 'REFUERZO_COCINA'].includes(responsable_puesto)) { const e = new Error('responsable_puesto inválido'); e.status = 400; throw e; }
+    if (!['DIURNO', 'NOCTURNO'].includes(responsable_turno_tipo)) { const e = new Error('responsable_turno_tipo inválido'); e.status = 400; throw e; }
+    return [{ userId: null, puesto: responsable_puesto, turnoTipo: responsable_turno_tipo }];
+  }
+  return [{ userId: responsable_user_id || null, puesto: null, turnoTipo: null }];
+}
+
 module.exports = function registrarRutasCalendario(app) {
   app.get('/api/calendario', async (req, res) => {
     const { desde, hasta, sucursal_id, tipo, estado, responsable_id, tipo_tarea_id } = req.query;
@@ -205,8 +227,11 @@ module.exports = function registrarRutasCalendario(app) {
       // tareas/auditorías donde es responsable), más los Eventos especiales
       // sin responsable de su propia sucursal (feriados/promos, visibles a
       // todos), más los turnos de OTROS que caen el mismo día y mismo
-      // turno_tipo que uno propio (para saber con quién le toca compartir) -
-      // nunca el calendario completo de la sucursal.
+      // turno_tipo que uno propio (para saber con quién le toca compartir),
+      // más las TAREA sin responsable fijo asignadas "por puesto/turno"
+      // (ver resolverResponsablesTarea) cuando ese día efectivamente tiene
+      // un turno propio con ese mismo puesto y turno_tipo - nunca el
+      // calendario completo de la sucursal.
       params.push(req.usuario.usuarioId); params.push(req.usuario.sucursal_id);
       const pUsuario = params.length - 1, pSucursal = params.length;
       sql += ` AND (e.responsable_user_id = $${pUsuario}
@@ -216,6 +241,13 @@ module.exports = function registrarRutasCalendario(app) {
                           WHERE e2.tipo = 'TURNO' AND e2.responsable_user_id = $${pUsuario}
                             AND e2.sucursal_id = e.sucursal_id AND e2.turno_tipo = e.turno_tipo
                             AND e2.fecha_hora::date = e.fecha_hora::date
+                        ))
+                    OR (e.tipo = 'TAREA' AND e.responsable_user_id IS NULL AND e.puesto IS NOT NULL AND e.turno_tipo IS NOT NULL
+                        AND EXISTS (
+                          SELECT 1 FROM schedule_events e3
+                          WHERE e3.tipo = 'TURNO' AND e3.responsable_user_id = $${pUsuario}
+                            AND e3.sucursal_id = e.sucursal_id AND e3.puesto = e.puesto AND e3.turno_tipo = e.turno_tipo
+                            AND e3.fecha_hora::date = e.fecha_hora::date
                         )))`;
     } else if (req.usuario.rol === 'GERENTE') {
       const scoped = scopeSucursal(req.usuario, 'e.sucursal_id', params);
@@ -321,22 +353,26 @@ module.exports = function registrarRutasCalendario(app) {
 
     const fechas = generarFechas(fecha_hora, recurrencia);
     try {
-      await validarResponsablePermitido(req.usuario, responsable_user_id);
-      const filas = fechas.map((f) => [
+      const responsables = tipo === 'TAREA'
+        ? resolverResponsablesTarea(req.body)
+        : [{ userId: responsable_user_id || null, puesto: null, turnoTipo: null }];
+      for (const r of responsables) await validarResponsablePermitido(req.usuario, r.userId);
+      const filas = fechas.flatMap((f) => responsables.map((r) => [
         sucursal_id, tipo, tipo === 'TAREA' ? null : template_id, tituloFinal, descripcion || null,
-        responsable_user_id || null, f.toISOString(), duracion_minutos || null, req.usuario.usuarioId,
+        r.userId, f.toISOString(), duracion_minutos || null, req.usuario.usuarioId,
         tipo === 'TAREA' ? (tarea_catalogo_id || null) : null, evidenciaObligatoria,
-        tipo === 'TAREA' ? hora_definida !== false : true,
-      ]);
+        tipo === 'TAREA' ? hora_definida !== false : true, r.puesto, r.turnoTipo,
+      ]));
       const insertados = await db.bulkInsert(db.pool, 'schedule_events',
-        ['sucursal_id', 'tipo', 'template_id', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'duracion_minutos', 'creado_por', 'tarea_catalogo_id', 'evidencia_obligatoria', 'hora_definida'],
+        ['sucursal_id', 'tipo', 'template_id', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'duracion_minutos', 'creado_por', 'tarea_catalogo_id', 'evidencia_obligatoria', 'hora_definida', 'puesto', 'turno_tipo'],
         filas, 'id');
       if (insertados.length > 1) {
         const serieId = insertados[0].id;
         await db.query('UPDATE schedule_events SET serie_id = $1 WHERE id = ANY($2)', [serieId, insertados.map((r) => r.id)]);
       }
-      if (responsable_user_id) {
-        await crearNotificacion(responsable_user_id, 'ASIGNACION', `Te asignaron: ${tituloFinal}`,
+      const idsANotificar = [...new Set(responsables.map((r) => r.userId).filter(Boolean))];
+      for (const uid of idsANotificar) {
+        await crearNotificacion(uid, 'ASIGNACION', `Te asignaron: ${tituloFinal}`,
           `Nueva ${tipo === 'TAREA' ? 'tarea' : 'auditoría'} programada en el calendario.`, { evento_id: insertados[0].id },
           tipo === 'TAREA' ? 'ASIGNACION_TAREA' : 'ASIGNACION_AUDITORIA');
       }
@@ -357,7 +393,7 @@ module.exports = function registrarRutasCalendario(app) {
   app.post('/api/calendario/tareas/programar', async (req, res) => {
     const {
       sucursal_id, tarea_catalogo_id, titulo, descripcion, foto_requerida,
-      responsable_user_id, frecuencia, dias_semana, dias_mes, hora, fecha_desde, fecha_hasta,
+      frecuencia, dias_semana, dias_mes, hora, fecha_desde, fecha_hasta,
     } = req.body;
     if (!sucursal_id || !frecuencia || !fecha_desde) return res.status(400).json({ error: 'Faltan campos: sucursal_id, frecuencia, fecha_desde' });
     if (!['SEMANAL', 'MENSUAL'].includes(frecuencia)) return res.status(400).json({ error: 'frecuencia inválida' });
@@ -378,23 +414,25 @@ module.exports = function registrarRutasCalendario(app) {
       }
       if (!tituloFinal) return res.status(400).json({ error: 'Falta el título' });
 
-      await validarResponsablePermitido(req.usuario, responsable_user_id);
+      const responsables = resolverResponsablesTarea(req.body);
+      for (const r of responsables) await validarResponsablePermitido(req.usuario, r.userId);
       const fechas = frecuencia === 'SEMANAL'
         ? generarFechasTareaPorDiaSemana(fecha_desde, fecha_hasta || null, dias_semana, hora || null)
         : generarFechasTareaPorDiaDelMes(fecha_desde, fecha_hasta || null, dias_mes, hora || null);
       if (!fechas.length) return res.status(400).json({ error: 'El rango de fechas no generó ninguna ocurrencia' });
 
-      const filas = fechas.map((f) => [
-        sucursal_id, 'TAREA', tituloFinal, descripcion || null, responsable_user_id || null, f.toISOString(),
-        req.usuario.usuarioId, tarea_catalogo_id || null, evidenciaObligatoria, !!hora,
-      ]);
+      const filas = fechas.flatMap((f) => responsables.map((r) => [
+        sucursal_id, 'TAREA', tituloFinal, descripcion || null, r.userId, f.toISOString(),
+        req.usuario.usuarioId, tarea_catalogo_id || null, evidenciaObligatoria, !!hora, r.puesto, r.turnoTipo,
+      ]));
       const insertados = await db.bulkInsert(db.pool, 'schedule_events',
-        ['sucursal_id', 'tipo', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'creado_por', 'tarea_catalogo_id', 'evidencia_obligatoria', 'hora_definida'],
+        ['sucursal_id', 'tipo', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'creado_por', 'tarea_catalogo_id', 'evidencia_obligatoria', 'hora_definida', 'puesto', 'turno_tipo'],
         filas, 'id');
       const serieId = insertados[0].id;
       await db.query('UPDATE schedule_events SET serie_id = $1 WHERE id = ANY($2)', [serieId, insertados.map((r) => r.id)]);
-      if (responsable_user_id) {
-        await crearNotificacion(responsable_user_id, 'ASIGNACION',
+      const idsANotificar = [...new Set(responsables.map((r) => r.userId).filter(Boolean))];
+      for (const uid of idsANotificar) {
+        await crearNotificacion(uid, 'ASIGNACION',
           insertados.length === 1 ? `Te asignaron: ${tituloFinal}` : `Tarea recurrente asignada: ${tituloFinal}`,
           insertados.length === 1 ? 'Nueva tarea programada en el calendario.' : `Se programaron ${insertados.length} ocurrencias en el calendario.`,
           { evento_ids: insertados.map((r) => r.id) }, 'ASIGNACION_TAREA');
