@@ -186,6 +186,26 @@ function registrarRutasPlantillas(app) {
     }
   });
 
+  // Borra la plantilla entera (sectores/areas/items/umbrales caen en
+  // cascada). Bloqueado si tiene alguna auditoría (audit_runs.template_id es
+  // ON DELETE RESTRICT a propósito - una auditoría ya hecha nunca debe
+  // quedar huérfana) - en ese caso hay que crear una nueva versión en vez
+  // de borrar la que ya se usó.
+  app.delete('/api/plantillas/:id', requireBuilder, async (req, res) => {
+    try {
+      const { rows } = await db.query('SELECT id FROM audit_templates WHERE id = $1', [req.params.id]);
+      if (!rows[0]) return res.status(404).json({ error: 'Plantilla no encontrada' });
+      const { rows: usos } = await db.query('SELECT COUNT(*)::int AS n FROM audit_runs WHERE template_id = $1', [req.params.id]);
+      if (usos[0].n > 0) {
+        return res.status(400).json({ error: `No se puede eliminar: ya tiene ${usos[0].n} auditoría${usos[0].n === 1 ? '' : 's'} realizada${usos[0].n === 1 ? '' : 's'} con esta plantilla.` });
+      }
+      await db.query('DELETE FROM audit_templates WHERE id = $1', [req.params.id]);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
   // Reemplaza sectores/areas/items/reglas/umbrales enteros. Body:
   // { sectores: [{nombre,orden}], areas: [{nombre,orden,peso}],
   //   items: [{sector, area, texto, ...campos, reglas:[{condicion,acciones}]}] (sector/area = nombre, se resuelven a id),

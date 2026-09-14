@@ -9,6 +9,10 @@ const { scopeSucursal } = require('../auth/middleware');
 
 module.exports = function registrarRutasHistorial(app) {
   app.get('/api/historial', async (req, res) => {
+    // Colaborador no tiene vista de historial (ve sus propias tareas/turnos
+    // en el calendario) - el frontend ya no lo enruta acá, pero se bloquea
+    // también del lado del servidor.
+    if (req.usuario.rol === 'COLABORADOR') return res.status(403).json({ error: 'No tenés acceso al historial' });
     const { sucursal_id, tipo, template_id, estado, desde, hasta, puntaje_min, puntaje_max } = req.query;
     let sql = `SELECT r.id, r.template_id, t.nombre AS plantilla_nombre, r.sucursal_id, s.nombre AS sucursal_nombre,
                       r.tipo, r.estado, r.creado_en, r.iniciada_en, r.completada_en, r.puntaje_total, r.semaforo, r.resultado,

@@ -401,6 +401,27 @@ module.exports = function registrarRutasRuns(app) {
     }
   });
 
+  // Elimina una auditoría abandonada (EN_PROGRESO/CANCELADA) - nunca una ya
+  // completada, para no perder historial real. Admin/Auditor sin
+  // restricción; Gerente solo las internas de su propia sucursal (mismo
+  // criterio que puede crear); Colaborador no puede eliminar ninguna.
+  app.delete('/api/runs/:id', async (req, res) => {
+    const run = await obtenerRunOForbidden(req, res);
+    if (!run) return;
+    if (req.usuario.rol === 'GERENTE') {
+      if (run.tipo !== 'INTERNA') return res.status(403).json({ error: 'Como gerente solo podés eliminar auditorías internas' });
+    } else if (req.usuario.rol !== 'ADMIN' && req.usuario.rol !== 'AUDITOR') {
+      return res.status(403).json({ error: 'No tenés permiso para eliminar auditorías' });
+    }
+    if (run.estado === 'COMPLETADA') return res.status(400).json({ error: 'No se puede eliminar una auditoría ya completada' });
+    try {
+      await db.query('DELETE FROM audit_runs WHERE id = $1', [req.params.id]);
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
   // Programa una auditoria de seguimiento a partir de los hallazgos
   // elegidos de una auditoria de MARCA ya completada - no la ejecuta al
   // toque: crea un evento de calendario (PENDIENTE) para una fecha/hora y
