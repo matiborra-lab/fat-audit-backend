@@ -204,9 +204,19 @@ module.exports = function registrarRutasCalendario(app) {
       // Un Colaborador solo ve lo que tiene asignado (sus turnos y las
       // tareas/auditorías donde es responsable), más los Eventos especiales
       // sin responsable de su propia sucursal (feriados/promos, visibles a
-      // todos) - nunca el calendario completo de la sucursal.
+      // todos), más los turnos de OTROS que caen el mismo día y mismo
+      // turno_tipo que uno propio (para saber con quién le toca compartir) -
+      // nunca el calendario completo de la sucursal.
       params.push(req.usuario.usuarioId); params.push(req.usuario.sucursal_id);
-      sql += ` AND (e.responsable_user_id = $${params.length - 1} OR (e.tipo = 'EVENTO_ESPECIAL' AND e.responsable_user_id IS NULL AND e.sucursal_id = $${params.length}))`;
+      const pUsuario = params.length - 1, pSucursal = params.length;
+      sql += ` AND (e.responsable_user_id = $${pUsuario}
+                    OR (e.tipo = 'EVENTO_ESPECIAL' AND e.responsable_user_id IS NULL AND e.sucursal_id = $${pSucursal})
+                    OR (e.tipo = 'TURNO' AND EXISTS (
+                          SELECT 1 FROM schedule_events e2
+                          WHERE e2.tipo = 'TURNO' AND e2.responsable_user_id = $${pUsuario}
+                            AND e2.sucursal_id = e.sucursal_id AND e2.turno_tipo = e.turno_tipo
+                            AND e2.fecha_hora::date = e.fecha_hora::date
+                        )))`;
     } else if (req.usuario.rol === 'GERENTE') {
       const scoped = scopeSucursal(req.usuario, 'e.sucursal_id', params);
       sql += scoped.sql; params = scoped.params;
