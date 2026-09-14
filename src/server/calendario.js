@@ -452,6 +452,12 @@ module.exports = function registrarRutasCalendario(app) {
     const evento = await obtenerEventoOForbidden(req, res);
     if (!evento) return;
     if (evento.tipo === 'TAREA') return res.status(400).json({ error: 'Este evento es una tarea, no una auditoría - usá /completar' });
+    // Gerente/Colaborador no pueden adelantar una auditoría antes del
+    // día/hora programado - Admin/Auditor sí, para poder resolver casos
+    // excepcionales (mismo criterio asimétrico que ya existe en otras rutas).
+    if ((req.usuario.rol === 'GERENTE' || req.usuario.rol === 'COLABORADOR') && new Date(evento.fecha_hora) > new Date()) {
+      return res.status(400).json({ error: 'Todavía no se puede iniciar - no llegó la fecha/hora programada' });
+    }
     try {
       let run;
       if (evento.tipo === 'SEGUIMIENTO' && evento.origen_run_id) {
