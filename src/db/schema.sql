@@ -469,3 +469,22 @@ CREATE TABLE recordatorios_enviados (
   UNIQUE (usuario_id, tipo, clave)
 );
 CREATE INDEX idx_reportes_programados_activo ON reportes_programados (activo);
+
+-- Licencias (vacaciones/salud/asuntos familiares) de un Gerente o
+-- Colaborador - las carga un Admin/Gerente desde Turnos > Licencias, nunca
+-- el propio interesado. fecha_desde/fecha_hasta son DATE (todo el día, sin
+-- hora) - se muestran como overlay de solo lectura en el calendario de esa
+-- persona (mismo criterio que feriados/cumpleaños) y como advertencia en
+-- Gestionar turnos al intentar asignarle un turno en ese rango.
+CREATE TABLE licencias (
+  id             SERIAL PRIMARY KEY,
+  usuario_id     INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE CASCADE,
+  fecha_desde    DATE NOT NULL,
+  fecha_hasta    DATE NOT NULL CHECK (fecha_hasta >= fecha_desde),
+  motivo         TEXT NOT NULL CHECK (motivo IN ('VACACIONES', 'SALUD', 'FAMILIAR', 'OTRO')),
+  detalle        TEXT,                    -- opcional, aclaración libre
+  creado_por     INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado_en      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_licencias_usuario ON licencias (usuario_id);
+CREATE INDEX idx_licencias_fechas ON licencias (fecha_desde, fecha_hasta);

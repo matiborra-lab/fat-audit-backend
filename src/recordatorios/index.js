@@ -187,7 +187,13 @@ async function verificarRecordatoriosCumpleanos() {
         try {
           const clave = `CUMPLEANOS-${cumpleanero.usuario_id}-${ahora.getFullYear()}`;
           if (await yaEnviado({ usuarioId: destinatario.id, tipo: 'CUMPLEANOS', clave })) continue;
-          await crearNotificacion(destinatario.id, 'CUMPLEANOS', 'Cumpleaños', `Hoy es el cumpleaños de ${cumpleanero.nombre}.`, { usuario_id: cumpleanero.usuario_id });
+          // A la persona que cumple años se lo saluda directo, no se le
+          // "avisa" que es su propio cumpleaños.
+          const esElMismo = destinatario.id === cumpleanero.usuario_id;
+          const cuerpo = esElMismo
+            ? `¡Feliz cumpleaños, ${cumpleanero.nombre}! 🎉🎂🥳`
+            : `Hoy es el cumpleaños de ${cumpleanero.nombre}.`;
+          await crearNotificacion(destinatario.id, 'CUMPLEANOS', esElMismo ? '¡Feliz cumpleaños!' : 'Cumpleaños', cuerpo, { usuario_id: cumpleanero.usuario_id });
           await marcarEnviado({ usuarioId: destinatario.id, tipo: 'CUMPLEANOS', clave });
         } catch (err) {
           console.error(`[recordatorios] error avisando cumpleaños de ${cumpleanero.usuario_id} a ${destinatario.id}:`, err.message);

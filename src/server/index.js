@@ -600,6 +600,7 @@ const notificaciones = require('./notificaciones');
 const notificacionPreferencias = require('./notificacion-preferencias');
 const reportes = require('./reportes');
 const tareas = require('./tareas');
+const licencias = require('./licencias');
 plantillas(app);
 runs(app);
 historial(app);
@@ -608,6 +609,7 @@ notificaciones(app);
 notificacionPreferencias(app);
 reportes(app);
 tareas(app);
+licencias(app);
 
 const { iniciarScheduler } = require('../reportes');
 iniciarScheduler();

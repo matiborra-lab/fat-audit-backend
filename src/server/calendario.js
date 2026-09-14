@@ -435,10 +435,25 @@ module.exports = function registrarRutasCalendario(app) {
     if (!evento) return;
     if (!puedeGestionarEvento(req.usuario, evento)) return res.status(403).json({ error: 'No tenés permiso para eliminar este evento' });
     try {
+      let eliminados;
       if (req.query.serie === 'true' && evento.serie_id) {
-        await db.query('DELETE FROM schedule_events WHERE serie_id = $1 AND fecha_hora >= $2', [evento.serie_id, evento.fecha_hora]);
+        eliminados = await db.query('DELETE FROM schedule_events WHERE serie_id = $1 AND fecha_hora >= $2 RETURNING *', [evento.serie_id, evento.fecha_hora]);
       } else {
-        await db.query('DELETE FROM schedule_events WHERE id = $1', [req.params.id]);
+        eliminados = await db.query('DELETE FROM schedule_events WHERE id = $1 RETURNING *', [req.params.id]);
+      }
+      // Un turno que ya se le había notificado a su responsable (confirmado
+      // y avisado) y ahora se da de baja necesita un aviso aparte - si nunca
+      // llegó a notificarse (todavía pendiente de "Asignar turnos"), no hace
+      // falta: esa persona nunca supo que existía.
+      const turnosAAvisar = eliminados.rows.filter((e) => e.tipo === 'TURNO' && e.responsable_user_id && e.notificado_en);
+      for (const t of turnosAAvisar) {
+        try {
+          await crearNotificacion(t.responsable_user_id, 'TURNOS_ASIGNADOS', 'Turno dado de baja',
+            `Tu turno del ${new Date(t.fecha_hora).toLocaleDateString('es-AR', { day: '2-digit', month: '2-digit', timeZone: 'America/Argentina/Buenos_Aires' })} fue dado de baja.`,
+            { evento_id: t.id }, 'TURNOS_ASIGNADOS');
+        } catch (err) {
+          console.error(`[calendario] error avisando baja de turno ${t.id}:`, err.message);
+        }
       }
       res.json({ ok: true });
     } catch (err) {
