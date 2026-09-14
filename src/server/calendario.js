@@ -116,6 +116,21 @@ function diaSemanaDeFecha(fechaISO) {
 // libremente quien programa - no depende de sucursal_horarios_turno). Si no
 // se pasa horaHHMM, cada ocurrencia queda al inicio del día (00:00) y el
 // caller marca hora_definida = false (ver POST /api/calendario/tareas/programar).
+// Repetición diaria de una TAREA (sin elegir días puntuales) - una ocurrencia
+// por cada día del rango, todos los días de la semana.
+function generarFechasTareaDiaria(fechaDesde, fechaHasta, horaHHMM) {
+  const desde = new Date(`${fechaDesde}T00:00:00`);
+  const hasta = fechaHasta ? new Date(`${fechaHasta}T23:59:59`) : new Date(desde.getTime() + DIAS_VENTANA_SIN_FIN * 86400000);
+  const [h, m] = horaHHMM ? horaHHMM.split(':').map(Number) : [0, 0];
+  const fechas = [];
+  const cursor = new Date(desde);
+  while (cursor <= hasta && fechas.length < MAX_OCURRENCIAS) {
+    fechas.push(new Date(cursor.getFullYear(), cursor.getMonth(), cursor.getDate(), h, m));
+    cursor.setDate(cursor.getDate() + 1);
+  }
+  return fechas;
+}
+
 function generarFechasTareaPorDiaSemana(fechaDesde, fechaHasta, diasSemana, horaHHMM) {
   const desde = new Date(`${fechaDesde}T00:00:00`);
   const hasta = fechaHasta ? new Date(`${fechaHasta}T23:59:59`) : new Date(desde.getTime() + DIAS_VENTANA_SIN_FIN * 86400000);
@@ -178,22 +193,25 @@ async function validarResponsablePermitido(usuarioCreador, responsableUserId) {
 
 // Para TAREA: arma la lista de "responsables" a cruzar con las fechas de la
 // ocurrencia (una fila por combinación fecha×responsable, mismo patrón que
-// "todas las sucursales" en EVENTO_ESPECIAL) - dos modos excluyentes:
-// - responsable_user_ids: una o más personas puntuales.
-// - responsable_puesto + responsable_turno_tipo: sin nadie fijo todavía -
-//   se resuelve solo, día a día, contra quien tenga ESE turno real
-//   (ver el bloque COLABORADOR de GET /api/calendario) - útil para una
-//   tarea recurrente donde el colaborador de ese puesto/turno va rotando.
-// Sin ninguno de los dos, cae al responsable_user_id suelto de siempre
-// (incluye "sin responsable", null).
-function resolverResponsablesTarea({ responsable_user_id, responsable_user_ids, responsable_puesto, responsable_turno_tipo }) {
-  if (Array.isArray(responsable_user_ids) && responsable_user_ids.length) {
-    return responsable_user_ids.map((id) => ({ userId: Number(id), puesto: null, turnoTipo: null }));
-  }
-  if (responsable_puesto && responsable_turno_tipo) {
-    if (!['COCINA', 'CAJA', 'REFUERZO_COCINA'].includes(responsable_puesto)) { const e = new Error('responsable_puesto inválido'); e.status = 400; throw e; }
-    if (!['DIURNO', 'NOCTURNO'].includes(responsable_turno_tipo)) { const e = new Error('responsable_turno_tipo inválido'); e.status = 400; throw e; }
-    return [{ userId: null, puesto: responsable_puesto, turnoTipo: responsable_turno_tipo }];
+// "todas las sucursales" en EVENTO_ESPECIAL). `responsables` es una lista
+// mixta armada en el frontend (ver SelectorResponsablesTarea en
+// Calendario.jsx): entradas { tipo: 'PERSONA', user_id } (alguien puntual) y/o
+// { tipo: 'PUESTO', puesto, turno_tipo } (sin nadie fijo todavía - se
+// resuelve solo, día a día, contra quien tenga ESE turno real, ver el bloque
+// COLABORADOR de GET /api/calendario; turno_tipo ya viene resuelto por el
+// frontend a partir de la hora de la tarea, no se vuelve a inferir acá).
+// Sin `responsables`, cae al responsable_user_id suelto de siempre (incluye
+// "sin responsable", null) - lo usan también AUDITORIA/SEGUIMIENTO.
+function resolverResponsablesTarea({ responsable_user_id, responsables }) {
+  if (Array.isArray(responsables) && responsables.length) {
+    return responsables.map((r) => {
+      if (r.tipo === 'PUESTO') {
+        if (!['COCINA', 'CAJA', 'REFUERZO_COCINA'].includes(r.puesto)) { const e = new Error('puesto inválido'); e.status = 400; throw e; }
+        if (!['DIURNO', 'NOCTURNO'].includes(r.turno_tipo)) { const e = new Error('turno_tipo inválido'); e.status = 400; throw e; }
+        return { userId: null, puesto: r.puesto, turnoTipo: r.turno_tipo };
+      }
+      return { userId: Number(r.user_id), puesto: null, turnoTipo: null };
+    });
   }
   return [{ userId: responsable_user_id || null, puesto: null, turnoTipo: null }];
 }
@@ -382,21 +400,21 @@ module.exports = function registrarRutasCalendario(app) {
     }
   });
 
-  // Tarea rutinaria recurrente (semanal o mensual) - a diferencia de la
-  // recurrencia genérica de POST /api/calendario (que solo repite en el
+  // Tarea rutinaria recurrente (diaria, semanal o mensual) - a diferencia de
+  // la recurrencia genérica de POST /api/calendario (que solo repite en el
   // mismo día de la semana/mes indefinidamente), acá se eligen días
   // puntuales y, opcionalmente, si la tarea no tiene horario fijo
   // (hora_definida = false, ver panel Tareas para el cálculo de demora).
   // Body: { sucursal_id, tarea_catalogo_id | (titulo + foto_requerida para "Otro"),
-  // descripcion, responsable_user_id, frecuencia: 'SEMANAL'|'MENSUAL',
-  // dias_semana[] | dias_mes[], hora (opcional 'HH:MM'), fecha_desde, fecha_hasta (opcional) }
+  // descripcion, responsable_user_id | responsables, frecuencia: 'DIARIA'|'SEMANAL'|'MENSUAL',
+  // dias_semana[] (SEMANAL) | dias_mes[] (MENSUAL), hora (opcional 'HH:MM'), fecha_desde, fecha_hasta (opcional) }
   app.post('/api/calendario/tareas/programar', async (req, res) => {
     const {
       sucursal_id, tarea_catalogo_id, titulo, descripcion, foto_requerida,
       frecuencia, dias_semana, dias_mes, hora, fecha_desde, fecha_hasta,
     } = req.body;
     if (!sucursal_id || !frecuencia || !fecha_desde) return res.status(400).json({ error: 'Faltan campos: sucursal_id, frecuencia, fecha_desde' });
-    if (!['SEMANAL', 'MENSUAL'].includes(frecuencia)) return res.status(400).json({ error: 'frecuencia inválida' });
+    if (!['DIARIA', 'SEMANAL', 'MENSUAL'].includes(frecuencia)) return res.status(400).json({ error: 'frecuencia inválida' });
     if (frecuencia === 'SEMANAL' && (!Array.isArray(dias_semana) || !dias_semana.length)) return res.status(400).json({ error: 'Falta dias_semana' });
     if (frecuencia === 'MENSUAL' && (!Array.isArray(dias_mes) || !dias_mes.length)) return res.status(400).json({ error: 'Falta dias_mes' });
     if (!puedeAccederSucursal(req.usuario, sucursal_id)) return res.status(403).json({ error: 'No tenés acceso a esa sucursal' });
@@ -416,9 +434,11 @@ module.exports = function registrarRutasCalendario(app) {
 
       const responsables = resolverResponsablesTarea(req.body);
       for (const r of responsables) await validarResponsablePermitido(req.usuario, r.userId);
-      const fechas = frecuencia === 'SEMANAL'
-        ? generarFechasTareaPorDiaSemana(fecha_desde, fecha_hasta || null, dias_semana, hora || null)
-        : generarFechasTareaPorDiaDelMes(fecha_desde, fecha_hasta || null, dias_mes, hora || null);
+      const fechas = frecuencia === 'DIARIA'
+        ? generarFechasTareaDiaria(fecha_desde, fecha_hasta || null, hora || null)
+        : frecuencia === 'SEMANAL'
+          ? generarFechasTareaPorDiaSemana(fecha_desde, fecha_hasta || null, dias_semana, hora || null)
+          : generarFechasTareaPorDiaDelMes(fecha_desde, fecha_hasta || null, dias_mes, hora || null);
       if (!fechas.length) return res.status(400).json({ error: 'El rango de fechas no generó ninguna ocurrencia' });
 
       const filas = fechas.flatMap((f) => responsables.map((r) => [
