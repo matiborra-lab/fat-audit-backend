@@ -303,9 +303,6 @@ CREATE TABLE tipos_tarea (
   orden    INTEGER NOT NULL DEFAULT 0,
   activo   BOOLEAN NOT NULL DEFAULT true,
   icono    TEXT,                          -- cualquier emoji (catálogo completo, ver SelectorEmojiCatalogo) - fallback 📝 en la app si no se eligió
-  descripcion TEXT,                       -- opcional, se muestra al completar una tarea de este tipo
-  enlace   TEXT,                          -- opcional, ej. tutorial o ecommerce del proveedor
-  enlace_nombre TEXT,                     -- opcional, texto del botón - fallback "Ver página" en la app
   creado_en TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE TABLE tareas_catalogo (
@@ -316,6 +313,9 @@ CREATE TABLE tareas_catalogo (
   activo                   BOOLEAN NOT NULL DEFAULT true,
   aplica_todas_sucursales  BOOLEAN NOT NULL DEFAULT true,
   foto_requerida           BOOLEAN NOT NULL DEFAULT false, -- exige evidencia fotografica (solo camara) al completarla
+  descripcion              TEXT,            -- opcional, instrucciones que se muestran al completar esta tarea puntual
+  enlace                   TEXT,            -- opcional, ej. tutorial o ecommerce del proveedor
+  enlace_nombre            TEXT,            -- opcional, texto del botón - fallback "Ir a página web" en la app
   creado_en                TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_tareas_catalogo_tipo ON tareas_catalogo (tipo_tarea_id);

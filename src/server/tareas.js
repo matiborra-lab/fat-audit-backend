@@ -78,8 +78,8 @@ module.exports = function registrarRutasTareas(app) {
     try {
       const { rows: max } = await db.query('SELECT COALESCE(MAX(orden), -1) + 1 AS siguiente FROM tipos_tarea');
       const { rows } = await db.query(
-        'INSERT INTO tipos_tarea (nombre, orden, icono, descripcion, enlace, enlace_nombre) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *',
-        [nombre, max[0].siguiente, req.body.icono || null, req.body.descripcion || null, req.body.enlace || null, req.body.enlace_nombre || null]
+        'INSERT INTO tipos_tarea (nombre, orden, icono) VALUES ($1,$2,$3) RETURNING *',
+        [nombre, max[0].siguiente, req.body.icono || null]
       );
       res.status(201).json(rows[0]);
     } catch (err) {
@@ -87,29 +87,14 @@ module.exports = function registrarRutasTareas(app) {
     }
   });
 
-  // Update dinámico en vez de COALESCE: distintos callers mandan distintos
-  // subconjuntos de campos (alternarTipoActivo solo manda `activo`, el modal
-  // de edición manda todo el form) - con COALESCE un campo opcional vacío
-  // (descripcion/enlace/enlace_nombre) nunca se podría limpiar sin también
-  // arriesgarse a que un PATCH parcial (como el toggle de activo) borre esos
-  // campos sin querer. Acá solo se toca una columna si su clave vino en el body.
   app.patch('/api/tipos-tarea/:id', requireAdmin, async (req, res) => {
-    const campos = [];
-    const params = [];
-    function set(columna, valor) { params.push(valor); campos.push(`${columna} = $${params.length}`); }
-    if (req.body.nombre !== undefined) set('nombre', req.body.nombre);
-    if (req.body.orden !== undefined) set('orden', req.body.orden);
-    if (req.body.activo !== undefined) set('activo', req.body.activo);
-    if (req.body.icono !== undefined) set('icono', req.body.icono || null);
-    if (req.body.descripcion !== undefined) set('descripcion', req.body.descripcion || null);
-    if (req.body.enlace !== undefined) set('enlace', req.body.enlace || null);
-    if (req.body.enlace_nombre !== undefined) set('enlace_nombre', req.body.enlace_nombre || null);
-    if (!campos.length) return res.status(400).json({ error: 'Nada para actualizar' });
-    params.push(req.params.id);
+    const { nombre, orden, activo, icono } = req.body;
     try {
       const { rows } = await db.query(
-        `UPDATE tipos_tarea SET ${campos.join(', ')} WHERE id = $${params.length} RETURNING *`,
-        params
+        `UPDATE tipos_tarea SET nombre = COALESCE($1,nombre), orden = COALESCE($2,orden), activo = COALESCE($3,activo),
+         icono = COALESCE($5,icono)
+         WHERE id = $4 RETURNING *`,
+        [nombre ?? null, orden ?? null, activo ?? null, req.params.id, icono ?? null]
       );
       if (!rows[0]) return res.status(404).json({ error: 'Tipo de tarea no encontrado' });
       res.json(rows[0]);
@@ -118,7 +103,9 @@ module.exports = function registrarRutasTareas(app) {
     }
   });
 
-  // Body: { tipo_tarea_id, nombre, aplica_todas_sucursales, foto_requerida, sucursal_ids }
+  // Body: { tipo_tarea_id, nombre, aplica_todas_sucursales, foto_requerida, sucursal_ids,
+  // descripcion, enlace, enlace_nombre } - descripcion/enlace/enlace_nombre son opcionales,
+  // instrucciones puntuales de ESTA tarea (no del tipo) que se muestran al completarla.
   app.post('/api/tareas-catalogo', requireAdmin, async (req, res) => {
     const { tipo_tarea_id, nombre, aplica_todas_sucursales = true, foto_requerida = false, sucursal_ids = [] } = req.body;
     if (!tipo_tarea_id || !nombre?.trim()) return res.status(400).json({ error: 'Faltan campos: tipo_tarea_id, nombre' });
@@ -127,9 +114,9 @@ module.exports = function registrarRutasTareas(app) {
       await client.query('BEGIN');
       const { rows: max } = await client.query('SELECT COALESCE(MAX(orden), -1) + 1 AS siguiente FROM tareas_catalogo WHERE tipo_tarea_id = $1', [tipo_tarea_id]);
       const { rows } = await client.query(
-        `INSERT INTO tareas_catalogo (tipo_tarea_id, nombre, orden, aplica_todas_sucursales, foto_requerida)
-         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [tipo_tarea_id, nombre.trim(), max[0].siguiente, !!aplica_todas_sucursales, !!foto_requerida]
+        `INSERT INTO tareas_catalogo (tipo_tarea_id, nombre, orden, aplica_todas_sucursales, foto_requerida, descripcion, enlace, enlace_nombre)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING *`,
+        [tipo_tarea_id, nombre.trim(), max[0].siguiente, !!aplica_todas_sucursales, !!foto_requerida, req.body.descripcion || null, req.body.enlace || null, req.body.enlace_nombre || null]
       );
       const tarea = rows[0];
       if (!aplica_todas_sucursales && sucursal_ids.length) {
@@ -145,18 +132,37 @@ module.exports = function registrarRutasTareas(app) {
     }
   });
 
+  // Update dinámico en vez de COALESCE: alternarTareaActiva manda solo
+  // `{activo}` - con COALESCE ahí, descripcion/enlace/enlace_nombre (que sí
+  // necesitan poder mandarse vacíos para borrarlos) obligarían a elegir entre
+  // "nunca se puede limpiar un enlace" o "el toggle de activo lo borra sin
+  // querer". Acá solo se toca una columna si su clave vino en el body.
   app.patch('/api/tareas-catalogo/:id', requireAdmin, async (req, res) => {
-    const { nombre, orden, activo, aplica_todas_sucursales, foto_requerida, sucursal_ids } = req.body;
+    const { sucursal_ids } = req.body;
+    const campos = [];
+    const params = [];
+    function set(columna, valor) { params.push(valor); campos.push(`${columna} = $${params.length}`); }
+    if (req.body.nombre !== undefined) set('nombre', req.body.nombre);
+    if (req.body.orden !== undefined) set('orden', req.body.orden);
+    if (req.body.activo !== undefined) set('activo', req.body.activo);
+    if (req.body.aplica_todas_sucursales !== undefined) set('aplica_todas_sucursales', req.body.aplica_todas_sucursales);
+    if (req.body.foto_requerida !== undefined) set('foto_requerida', req.body.foto_requerida);
+    if (req.body.descripcion !== undefined) set('descripcion', req.body.descripcion || null);
+    if (req.body.enlace !== undefined) set('enlace', req.body.enlace || null);
+    if (req.body.enlace_nombre !== undefined) set('enlace_nombre', req.body.enlace_nombre || null);
+    if (!campos.length && sucursal_ids === undefined) return res.status(400).json({ error: 'Nada para actualizar' });
     const client = await db.pool.connect();
     try {
       await client.query('BEGIN');
-      const { rows } = await client.query(
-        `UPDATE tareas_catalogo SET nombre = COALESCE($1,nombre), orden = COALESCE($2,orden), activo = COALESCE($3,activo),
-         aplica_todas_sucursales = COALESCE($4,aplica_todas_sucursales), foto_requerida = COALESCE($5,foto_requerida)
-         WHERE id = $6 RETURNING *`,
-        [nombre ?? null, orden ?? null, activo ?? null, aplica_todas_sucursales ?? null, foto_requerida ?? null, req.params.id]
-      );
-      const tarea = rows[0];
+      let tarea;
+      if (campos.length) {
+        params.push(req.params.id);
+        const { rows } = await client.query(`UPDATE tareas_catalogo SET ${campos.join(', ')} WHERE id = $${params.length} RETURNING *`, params);
+        tarea = rows[0];
+      } else {
+        const { rows } = await client.query('SELECT * FROM tareas_catalogo WHERE id = $1', [req.params.id]);
+        tarea = rows[0];
+      }
       if (!tarea) { await client.query('ROLLBACK'); return res.status(404).json({ error: 'Tarea no encontrada' }); }
       if (sucursal_ids !== undefined) {
         await client.query('DELETE FROM tarea_sucursales WHERE tarea_id = $1', [tarea.id]);

@@ -183,7 +183,7 @@ module.exports = function registrarRutasCalendario(app) {
                       cu.nombre AS creado_por_nombre,
                       t.nombre AS plantilla_nombre, t.tipo AS plantilla_tipo,
                       tt.id AS tipo_tarea_id, tt.nombre AS tipo_tarea_nombre, tt.icono AS tipo_tarea_icono,
-                      tt.descripcion AS tipo_tarea_descripcion, tt.enlace AS tipo_tarea_enlace, tt.enlace_nombre AS tipo_tarea_enlace_nombre,
+                      tc.descripcion AS tarea_descripcion, tc.enlace AS tarea_enlace, tc.enlace_nombre AS tarea_enlace_nombre,
                       CASE
                         WHEN e.estado != 'PENDIENTE' THEN e.estado
                         WHEN e.tipo = 'TAREA' AND e.hora_definida AND now() > e.fecha_hora + interval '12 hours' THEN 'DEMORADA'
