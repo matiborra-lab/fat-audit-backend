@@ -199,7 +199,10 @@ async function validarResponsablePermitido(usuarioCreador, responsableUserId) {
 // { tipo: 'PUESTO', puesto, turno_tipo } (sin nadie fijo todavía - se
 // resuelve solo, día a día, contra quien tenga ESE turno real, ver el bloque
 // COLABORADOR de GET /api/calendario; turno_tipo ya viene resuelto por el
-// frontend a partir de la hora de la tarea, no se vuelve a inferir acá).
+// frontend a partir de la hora de la tarea, no se vuelve a inferir acá -
+// turno_tipo null es válido a propósito: sin hora puesta, el criterio no
+// queda atado a un turno puntual y aplica a cualquiera de ese puesto en
+// todo el día).
 // Sin `responsables`, cae al responsable_user_id suelto de siempre (incluye
 // "sin responsable", null) - lo usan también AUDITORIA/SEGUIMIENTO.
 function resolverResponsablesTarea({ responsable_user_id, responsables }) {
@@ -207,8 +210,8 @@ function resolverResponsablesTarea({ responsable_user_id, responsables }) {
     return responsables.map((r) => {
       if (r.tipo === 'PUESTO') {
         if (!['COCINA', 'CAJA', 'REFUERZO_COCINA'].includes(r.puesto)) { const e = new Error('puesto inválido'); e.status = 400; throw e; }
-        if (!['DIURNO', 'NOCTURNO'].includes(r.turno_tipo)) { const e = new Error('turno_tipo inválido'); e.status = 400; throw e; }
-        return { userId: null, puesto: r.puesto, turnoTipo: r.turno_tipo };
+        if (r.turno_tipo != null && !['DIURNO', 'NOCTURNO'].includes(r.turno_tipo)) { const e = new Error('turno_tipo inválido'); e.status = 400; throw e; }
+        return { userId: null, puesto: r.puesto, turnoTipo: r.turno_tipo ?? null };
       }
       return { userId: Number(r.user_id), puesto: null, turnoTipo: null };
     });
@@ -246,9 +249,11 @@ module.exports = function registrarRutasCalendario(app) {
       // sin responsable de su propia sucursal (feriados/promos, visibles a
       // todos), más los turnos de OTROS que caen el mismo día y mismo
       // turno_tipo que uno propio (para saber con quién le toca compartir),
-      // más las TAREA sin responsable fijo asignadas "por puesto/turno"
-      // (ver resolverResponsablesTarea) cuando ese día efectivamente tiene
-      // un turno propio con ese mismo puesto y turno_tipo - nunca el
+      // más las TAREA sin responsable fijo asignadas "por puesto" (ver
+      // resolverResponsablesTarea) cuando ese día efectivamente tiene un
+      // turno propio con ese mismo puesto - si la tarea además especificó
+      // turno_tipo, tiene que coincidir también; si no (turno_tipo null),
+      // aplica a cualquier turno de ese puesto ese día - nunca el
       // calendario completo de la sucursal.
       params.push(req.usuario.usuarioId); params.push(req.usuario.sucursal_id);
       const pUsuario = params.length - 1, pSucursal = params.length;
@@ -260,11 +265,12 @@ module.exports = function registrarRutasCalendario(app) {
                             AND e2.sucursal_id = e.sucursal_id AND e2.turno_tipo = e.turno_tipo
                             AND e2.fecha_hora::date = e.fecha_hora::date
                         ))
-                    OR (e.tipo = 'TAREA' AND e.responsable_user_id IS NULL AND e.puesto IS NOT NULL AND e.turno_tipo IS NOT NULL
+                    OR (e.tipo = 'TAREA' AND e.responsable_user_id IS NULL AND e.puesto IS NOT NULL
                         AND EXISTS (
                           SELECT 1 FROM schedule_events e3
                           WHERE e3.tipo = 'TURNO' AND e3.responsable_user_id = $${pUsuario}
-                            AND e3.sucursal_id = e.sucursal_id AND e3.puesto = e.puesto AND e3.turno_tipo = e.turno_tipo
+                            AND e3.sucursal_id = e.sucursal_id AND e3.puesto = e.puesto
+                            AND (e.turno_tipo IS NULL OR e3.turno_tipo = e.turno_tipo)
                             AND e3.fecha_hora::date = e.fecha_hora::date
                         )))`;
     } else if (req.usuario.rol === 'GERENTE') {
