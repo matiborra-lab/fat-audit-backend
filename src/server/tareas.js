@@ -120,7 +120,9 @@ module.exports = function registrarRutasTareas(app) {
       );
       const tarea = rows[0];
       if (!aplica_todas_sucursales && sucursal_ids.length) {
-        await db.bulkInsert(client, 'tarea_sucursales', ['tarea_id', 'sucursal_id'], sucursal_ids.map((sId) => [tarea.id, sId]));
+        // tarea_sucursales no tiene columna id (PK compuesta tarea_id+sucursal_id) -
+        // hay que pedirle a bulkInsert que devuelva otra cosa en vez del "id" default.
+        await db.bulkInsert(client, 'tarea_sucursales', ['tarea_id', 'sucursal_id'], sucursal_ids.map((sId) => [tarea.id, sId]), 'tarea_id');
       }
       await client.query('COMMIT');
       res.status(201).json({ ...tarea, sucursal_ids: aplica_todas_sucursales ? [] : sucursal_ids });
@@ -167,7 +169,7 @@ module.exports = function registrarRutasTareas(app) {
       if (sucursal_ids !== undefined) {
         await client.query('DELETE FROM tarea_sucursales WHERE tarea_id = $1', [tarea.id]);
         if (!tarea.aplica_todas_sucursales && sucursal_ids.length) {
-          await db.bulkInsert(client, 'tarea_sucursales', ['tarea_id', 'sucursal_id'], sucursal_ids.map((sId) => [tarea.id, sId]));
+          await db.bulkInsert(client, 'tarea_sucursales', ['tarea_id', 'sucursal_id'], sucursal_ids.map((sId) => [tarea.id, sId]), 'tarea_id');
         }
       }
       await client.query('COMMIT');
