@@ -29,7 +29,7 @@ function registrarActividad(usuarioId) {
 }
 
 // Exige un token valido y deja los datos del usuario en
-// req.usuario = { usuarioId, rol, sucursal_id, activo, email, nombre }.
+// req.usuario = { usuarioId, rol, sucursal_id, activo, email, nombre, tutorial_completado_en }.
 // rol/sucursal_id/activo se leen FRESCOS de la base en cada request (no del
 // JWT, que puede durar hasta 30 dias).
 async function requireAuth(req, res, next) {
@@ -40,7 +40,7 @@ async function requireAuth(req, res, next) {
   try {
     const payload = verificarToken(token);
     const { rows } = await db.query(
-      'SELECT rol, sucursal_id, activo, email, nombre FROM usuarios WHERE id = $1',
+      'SELECT rol, sucursal_id, activo, email, nombre, tutorial_completado_en FROM usuarios WHERE id = $1',
       [payload.usuarioId]
     );
     const fila = rows[0];
@@ -54,6 +54,7 @@ async function requireAuth(req, res, next) {
       activo: fila.activo,
       email: fila.email,
       nombre: fila.nombre,
+      tutorial_completado_en: fila.tutorial_completado_en,
     };
     registrarActividad(payload.usuarioId);
     next();

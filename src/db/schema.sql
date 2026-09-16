@@ -52,6 +52,8 @@ CREATE TABLE usuarios (
   ultimo_login      TIMESTAMPTZ,
   ultima_actividad_en TIMESTAMPTZ,           -- cualquier request autenticado (no solo login) - ver requireAuth,
                                               -- se actualiza con throttle para no escribir en cada pedido
+  tutorial_completado_en TIMESTAMPTZ,        -- NULL = todavia no vio/omitio el tutorial guiado del Centro de
+                                              -- ayuda - se muestra la bienvenida una sola vez, ver Onboarding.jsx
   creado_en         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_usuarios_sucursal ON usuarios (sucursal_id);

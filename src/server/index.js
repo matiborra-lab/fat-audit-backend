@@ -95,7 +95,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const valor = String(identificador).toLowerCase().trim();
     const { rows } = await db.query(
-      'SELECT id, email, nombre, password_hash, rol, sucursal_id, activo FROM usuarios WHERE email = $1 OR LOWER(usuario) = $1',
+      'SELECT id, email, nombre, password_hash, rol, sucursal_id, activo, tutorial_completado_en FROM usuarios WHERE email = $1 OR LOWER(usuario) = $1',
       [valor]
     );
     const usuario = rows[0];
@@ -106,7 +106,10 @@ app.post('/api/auth/login', async (req, res) => {
     const token = emitirToken(usuario);
     res.json({
       token,
-      usuario: { id: usuario.id, email: usuario.email, nombre: usuario.nombre, rol: usuario.rol, sucursal_id: usuario.sucursal_id },
+      usuario: {
+        id: usuario.id, email: usuario.email, nombre: usuario.nombre, rol: usuario.rol, sucursal_id: usuario.sucursal_id,
+        tutorial_completado_en: usuario.tutorial_completado_en,
+      },
     });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -169,7 +172,24 @@ app.get('/api/auth/yo', (req, res) => {
   res.json({
     id: req.usuario.usuarioId, email: req.usuario.email, nombre: req.usuario.nombre,
     rol: req.usuario.rol, sucursal_id: req.usuario.sucursal_id,
+    tutorial_completado_en: req.usuario.tutorial_completado_en,
   });
+});
+
+// El Centro de ayuda marca esto al terminar u omitir el tutorial guiado (ver
+// Onboarding.jsx) - no vuelve a mostrar la bienvenida automatica, pero el
+// usuario puede volver a arrancarlo manualmente desde /ayuda en cualquier
+// momento (eso no toca este campo).
+app.post('/api/auth/tutorial-completado', async (req, res) => {
+  try {
+    const { rows } = await db.query(
+      'UPDATE usuarios SET tutorial_completado_en = now() WHERE id = $1 RETURNING tutorial_completado_en',
+      [req.usuario.usuarioId]
+    );
+    res.json({ tutorial_completado_en: rows[0].tutorial_completado_en });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
 });
 
 app.post('/api/auth/cambiar-password', async (req, res) => {
