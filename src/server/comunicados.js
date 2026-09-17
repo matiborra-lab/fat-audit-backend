@@ -109,14 +109,41 @@ module.exports = function registrarRutasComunicados(app) {
     }
   });
 
-  // Solo se puede borrar uno que todavía no salió (programado a futuro) -
-  // uno ya enviado queda como historial, no se puede "deshacer" el envío.
+  // Detalle de un comunicado ya enviado/programado: los datos del comunicado
+  // + a quién le llegó y quién ya lo abrió (leida_en) - las notificaciones
+  // ya mandadas quedan enlazadas por comunicado_id dentro de payload_json
+  // (no hay FK: crearNotificaciones/enviarComunicado no conocen la tabla
+  // comunicados, ver src/comunicados/index.js).
+  app.get('/api/comunicados/:id', requireAdmin, async (req, res) => {
+    try {
+      const { rows } = await db.query(
+        `SELECT c.*, ${db.nombreCompletoSql('u')} AS creado_por_nombre FROM comunicados c
+         LEFT JOIN usuarios u ON u.id = c.creado_por
+         WHERE c.id = $1`,
+        [req.params.id]
+      );
+      if (!rows[0]) return res.status(404).json({ error: 'Comunicado no encontrado' });
+      const { rows: destinatarios } = await db.query(
+        `SELECT n.usuario_id, ${db.nombreCompletoSql('u')} AS nombre, u.email, n.leida_en, n.creado_en
+         FROM notificaciones n JOIN usuarios u ON u.id = n.usuario_id
+         WHERE n.tipo = 'COMUNICADO' AND (n.payload_json->>'comunicado_id')::int = $1::int
+         ORDER BY (n.leida_en IS NULL), n.leida_en DESC, nombre`,
+        [req.params.id]
+      );
+      res.json({ ...rows[0], destinatarios });
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Se puede eliminar cualquier comunicado, ya enviado o programado - borra
+  // solo el registro administrativo (este historial); no retira las
+  // notificaciones que ya le llegaron a cada destinatario, eso no se puede
+  // deshacer una vez entregado.
   app.delete('/api/comunicados/:id', requireAdmin, async (req, res) => {
     try {
-      const { rows } = await db.query('SELECT enviado_en FROM comunicados WHERE id = $1', [req.params.id]);
+      const { rows } = await db.query('DELETE FROM comunicados WHERE id = $1 RETURNING id', [req.params.id]);
       if (!rows[0]) return res.status(404).json({ error: 'Comunicado no encontrado' });
-      if (rows[0].enviado_en) return res.status(400).json({ error: 'Este comunicado ya se envió, no se puede eliminar' });
-      await db.query('DELETE FROM comunicados WHERE id = $1', [req.params.id]);
       res.json({ ok: true });
     } catch (err) {
       res.status(400).json({ error: err.message });
