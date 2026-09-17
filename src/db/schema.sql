@@ -38,7 +38,11 @@ CREATE TABLE usuarios (
   id            SERIAL PRIMARY KEY,
   email         TEXT NOT NULL UNIQUE,
   usuario       TEXT UNIQUE,            -- nombre de usuario opcional - permite loguearse con email O con usuario
-  nombre        TEXT,
+  nombre        TEXT,                    -- nombre de pila. En usuarios creados antes de agregarse
+                                          -- `apellido` (2026-09), esta columna quedo con el nombre
+                                          -- completo tal cual estaba - se van editando a mano.
+  apellido      TEXT,                    -- opcional - nombre completo para mostrar es
+                                          -- TRIM(nombre || ' ' || COALESCE(apellido, ''))
   password_hash TEXT,                    -- NULL hasta que acepta la invitacion y pone su clave
   rol           TEXT NOT NULL DEFAULT 'AUDITOR' CHECK (rol IN ('ADMIN', 'AUDITOR', 'GERENTE', 'COLABORADOR')),
   sucursal_id   INTEGER REFERENCES sucursales(id) ON DELETE SET NULL,

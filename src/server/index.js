@@ -95,7 +95,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const valor = String(identificador).toLowerCase().trim();
     const { rows } = await db.query(
-      'SELECT id, email, nombre, password_hash, rol, sucursal_id, activo, tutorial_completado_en FROM usuarios WHERE email = $1 OR LOWER(usuario) = $1',
+      "SELECT id, email, TRIM(nombre || ' ' || COALESCE(apellido, '')) AS nombre, password_hash, rol, sucursal_id, activo, tutorial_completado_en FROM usuarios WHERE email = $1 OR LOWER(usuario) = $1",
       [valor]
     );
     const usuario = rows[0];
@@ -151,7 +151,7 @@ app.post('/api/auth/definir-password', async (req, res) => {
     const hash = await hashearPassword(password);
     const { rows } = await db.query(
       `UPDATE usuarios SET password_hash = $1, ultimo_login = now() WHERE id = $2
-       RETURNING id, email, nombre, rol, sucursal_id`,
+       RETURNING id, email, TRIM(nombre || ' ' || COALESCE(apellido, '')) AS nombre, rol, sucursal_id`,
       [hash, registro.usuario_id]
     );
     await marcarTokenUsado(registro.id);
@@ -298,7 +298,7 @@ app.get('/api/sucursales/:id/cumpleanos', async (req, res) => {
   const anio = Number(req.query.anio) || new Date().getFullYear();
   try {
     const { rows } = await db.query(
-      `SELECT id AS usuario_id, nombre, email, fecha_nacimiento
+      `SELECT id AS usuario_id, TRIM(nombre || ' ' || COALESCE(apellido, '')) AS nombre, email, fecha_nacimiento
        FROM usuarios
        WHERE sucursal_id = $1 AND activo = true AND rol IN ('GERENTE','COLABORADOR') AND fecha_nacimiento IS NOT NULL`,
       [req.params.id]
@@ -419,7 +419,7 @@ app.get('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
     // to_char en fecha_nacimiento - una columna DATE cruda serializa como
     // timestamp completo via pg/JSON, y el frontend la usa tal cual en un
     // <input type="date"> (mismo ajuste que GET /api/feriados).
-    let sql = `SELECT u.id, u.email, u.usuario, u.nombre, u.rol, u.sucursal_id, s.nombre AS sucursal_nombre, u.puesto,
+    let sql = `SELECT u.id, u.email, u.usuario, u.nombre, u.apellido, u.rol, u.sucursal_id, s.nombre AS sucursal_nombre, u.puesto,
               to_char(u.fecha_nacimiento, 'YYYY-MM-DD') AS fecha_nacimiento,
               u.activo, u.eliminado_en, u.ultimo_login, u.ultima_actividad_en, u.creado_en, (u.password_hash IS NOT NULL) AS clave_definida
        FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id WHERE 1=1`;
@@ -442,7 +442,7 @@ app.get('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
 });
 
 app.post('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
-  let { email, usuario: nombreUsuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento } = req.body;
+  let { email, usuario: nombreUsuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento } = req.body;
   if (!email || !EMAIL_REGEX.test(email)) return res.status(400).json({ error: 'El email no es valido' });
   if (nombreUsuario && !USUARIO_REGEX.test(nombreUsuario)) return res.status(400).json({ error: 'El nombre de usuario tiene que tener 3-30 caracteres (letras, numeros, puntos, guiones)' });
 
@@ -459,9 +459,9 @@ app.post('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      `INSERT INTO usuarios (email, usuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento) VALUES ($1,$2,$3,$4,$5,$6,$7)
-       RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento, activo, creado_en`,
-      [String(email).toLowerCase().trim(), nombreUsuario ? nombreUsuario.trim() : null, nombre || null, rol, (rol === 'GERENTE' || rol === 'COLABORADOR') ? sucursal_id : null, rol === 'COLABORADOR' ? puesto : null, fecha_nacimiento || null]
+      `INSERT INTO usuarios (email, usuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
+       RETURNING id, email, usuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento, activo, creado_en`,
+      [String(email).toLowerCase().trim(), nombreUsuario ? nombreUsuario.trim() : null, nombre || null, apellido || null, rol, (rol === 'GERENTE' || rol === 'COLABORADOR') ? sucursal_id : null, rol === 'COLABORADOR' ? puesto : null, fecha_nacimiento || null]
     );
     const usuario = rows[0];
     try {
@@ -510,15 +510,15 @@ app.patch('/api/admin/usuarios/:id', requireAdminOGerente, async (req, res) => {
       }
       if (req.body.email && !EMAIL_REGEX.test(req.body.email)) return res.status(400).json({ error: 'El email no es valido' });
       const { rows } = await db.query(
-        `UPDATE usuarios SET nombre = COALESCE($1,nombre), puesto = COALESCE($2,puesto), activo = COALESCE($3,activo),
+        `UPDATE usuarios SET nombre = COALESCE($1,nombre), apellido = COALESCE($8,apellido), puesto = COALESCE($2,puesto), activo = COALESCE($3,activo),
          usuario = COALESCE($5,usuario), fecha_nacimiento = COALESCE($6,fecha_nacimiento), email = COALESCE($7,email)
-         WHERE id = $4 RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento, activo`,
-        [req.body.nombre ?? null, req.body.puesto ?? null, req.body.activo ?? null, req.params.id, req.body.usuario ? req.body.usuario.trim() : null, req.body.fecha_nacimiento ?? null, req.body.email ? String(req.body.email).toLowerCase().trim() : null]
+         WHERE id = $4 RETURNING id, email, usuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento, activo`,
+        [req.body.nombre ?? null, req.body.puesto ?? null, req.body.activo ?? null, req.params.id, req.body.usuario ? req.body.usuario.trim() : null, req.body.fecha_nacimiento ?? null, req.body.email ? String(req.body.email).toLowerCase().trim() : null, req.body.apellido ?? null]
       );
       return res.json(rows[0]);
     }
 
-    const { rol, sucursal_id, activo, nombre, puesto, usuario: nombreUsuario, fecha_nacimiento, email } = req.body;
+    const { rol, sucursal_id, activo, nombre, apellido, puesto, usuario: nombreUsuario, fecha_nacimiento, email } = req.body;
     if (rol !== undefined && !ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol invalido' });
     if (rol === 'GERENTE' && sucursal_id === undefined) return res.status(400).json({ error: 'Un gerente necesita una sucursal asignada' });
     if (rol === 'COLABORADOR' && sucursal_id === undefined) return res.status(400).json({ error: 'Un colaborador necesita una sucursal asignada' });
@@ -526,13 +526,13 @@ app.patch('/api/admin/usuarios/:id', requireAdminOGerente, async (req, res) => {
     if (nombreUsuario && !USUARIO_REGEX.test(nombreUsuario)) return res.status(400).json({ error: 'El nombre de usuario tiene que tener 3-30 caracteres (letras, numeros, puntos, guiones)' });
     if (email && !EMAIL_REGEX.test(email)) return res.status(400).json({ error: 'El email no es valido' });
     const { rows } = await db.query(
-      `UPDATE usuarios SET rol = COALESCE($1,rol), nombre = COALESCE($2,nombre),
+      `UPDATE usuarios SET rol = COALESCE($1,rol), nombre = COALESCE($2,nombre), apellido = COALESCE($10,apellido),
        sucursal_id = CASE WHEN $1 IN ('GERENTE','COLABORADOR') THEN $3 WHEN $1 IS NOT NULL THEN NULL ELSE sucursal_id END,
        puesto = CASE WHEN $1 = 'COLABORADOR' THEN COALESCE($6,puesto) WHEN $1 IS NOT NULL THEN NULL ELSE puesto END,
        activo = COALESCE($4,activo), usuario = COALESCE($7,usuario), fecha_nacimiento = COALESCE($8,fecha_nacimiento),
        email = COALESCE($9,email)
-       WHERE id = $5 RETURNING id, email, usuario, nombre, rol, sucursal_id, puesto, fecha_nacimiento, activo`,
-      [rol ?? null, nombre ?? null, sucursal_id ?? null, activo ?? null, req.params.id, puesto ?? null, nombreUsuario ? nombreUsuario.trim() : null, fecha_nacimiento ?? null, email ? String(email).toLowerCase().trim() : null]
+       WHERE id = $5 RETURNING id, email, usuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento, activo`,
+      [rol ?? null, nombre ?? null, sucursal_id ?? null, activo ?? null, req.params.id, puesto ?? null, nombreUsuario ? nombreUsuario.trim() : null, fecha_nacimiento ?? null, email ? String(email).toLowerCase().trim() : null, apellido ?? null]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
     res.json(rows[0]);
@@ -587,7 +587,7 @@ app.get('/api/usuarios/buscar', async (req, res) => {
     const params = [];
     let sql;
     if (todasLasSucursales) {
-      sql = `SELECT u.id, u.nombre, u.email, u.rol, u.puesto, s.nombre AS sucursal_nombre
+      sql = `SELECT u.id, ${db.nombreCompletoSql('u')} AS nombre, u.email, u.rol, u.puesto, s.nombre AS sucursal_nombre
              FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id WHERE u.activo = true`;
     } else {
       params.push(sucursalId);
@@ -595,14 +595,18 @@ app.get('/api/usuarios/buscar', async (req, res) => {
       // otro Gerente de su sucursal o a un Colaborador) - Admin/Auditor
       // siguen viendo a todos, incluidos ellos mismos.
       sql = req.usuario.rol === 'GERENTE'
-        ? `SELECT id, nombre, email, rol, puesto FROM usuarios
+        ? `SELECT id, ${db.nombreCompletoSql('usuarios')} AS nombre, email, rol, puesto FROM usuarios
            WHERE activo = true AND sucursal_id = $1 AND rol IN ('GERENTE','COLABORADOR')`
-        : `SELECT id, nombre, email, rol, puesto FROM usuarios
+        : `SELECT id, ${db.nombreCompletoSql('usuarios')} AS nombre, email, rol, puesto FROM usuarios
            WHERE activo = true AND (sucursal_id = $1 OR rol IN ('ADMIN','AUDITOR'))`;
     }
     if (q) {
       params.push(`%${q}%`);
-      sql += ` AND (${todasLasSucursales ? 'u.nombre' : 'nombre'} ILIKE $${params.length} OR ${todasLasSucursales ? 'u.email' : 'email'} ILIKE $${params.length})`;
+      // Busca por nombre O apellido (ej. buscar "Pérez" tiene que encontrar
+      // a alguien con apellido "Pérez" aunque no coincida el nombre de pila).
+      sql += todasLasSucursales
+        ? ` AND (u.nombre ILIKE $${params.length} OR u.apellido ILIKE $${params.length} OR u.email ILIKE $${params.length})`
+        : ` AND (nombre ILIKE $${params.length} OR apellido ILIKE $${params.length} OR email ILIKE $${params.length})`;
     }
     sql += ` ORDER BY (${todasLasSucursales ? 'u.rol' : 'rol'} = 'COLABORADOR') DESC, (${todasLasSucursales ? 'u.rol' : 'rol'} = 'GERENTE') DESC, ${todasLasSucursales ? 'u.nombre' : 'nombre'} LIMIT 20`;
     const { rows } = await db.query(sql, params);

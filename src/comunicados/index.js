@@ -62,6 +62,8 @@ function interpolar(texto, valores) {
   if (!texto) return texto;
   return texto
     .replaceAll('{nombre}', valores.nombre || '')
+    .replaceAll('{apellido}', valores.apellido || '')
+    .replaceAll('{nombre_completo}', valores.nombre_completo || '')
     .replaceAll('{usuario}', valores.usuario || '')
     .replaceAll('{sucursal}', valores.sucursal || '')
     .replaceAll('{fecha}', valores.fecha || '');
@@ -81,7 +83,7 @@ async function enviarComunicado(comunicado) {
   }
 
   const { rows: usuarios } = await db.query(
-    `SELECT u.id, u.nombre, u.email, u.usuario, s.nombre AS sucursal_nombre
+    `SELECT u.id, u.nombre, u.apellido, u.email, u.usuario, s.nombre AS sucursal_nombre
      FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id
      WHERE u.id = ANY($1) AND u.activo = true`,
     [destinatarioIds]
@@ -95,7 +97,15 @@ async function enviarComunicado(comunicado) {
   const esSoloPush = !comunicado.descripcion && !comunicado.imagen_url && !comunicado.enlace;
 
   const filas = usuarios.map((u) => {
-    const valores = { nombre: u.nombre || u.email, usuario: u.usuario || u.email, sucursal: u.sucursal_nombre || '', fecha: fechaTexto };
+    const nombreCompleto = [u.nombre, u.apellido].filter(Boolean).join(' ').trim() || u.email;
+    const valores = {
+      nombre: u.nombre || u.email,
+      apellido: u.apellido || '',
+      nombre_completo: nombreCompleto,
+      usuario: u.usuario || u.email,
+      sucursal: u.sucursal_nombre || '',
+      fecha: fechaTexto,
+    };
     const titulo = interpolar(comunicado.titulo, valores);
     const cuerpo = interpolar(comunicado.descripcion, valores) || null;
     const payload = {

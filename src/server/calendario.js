@@ -224,8 +224,8 @@ function resolverResponsablesTarea({ responsable_user_id, responsables }) {
 module.exports = function registrarRutasCalendario(app) {
   app.get('/api/calendario', async (req, res) => {
     const { desde, hasta, sucursal_id, tipo, estado, responsable_id, tipo_tarea_id } = req.query;
-    let sql = `SELECT e.*, s.nombre AS sucursal_nombre, u.nombre AS responsable_nombre,
-                      cu.nombre AS creado_por_nombre,
+    let sql = `SELECT e.*, s.nombre AS sucursal_nombre, ${db.nombreCompletoSql('u')} AS responsable_nombre,
+                      ${db.nombreCompletoSql('cu')} AS creado_por_nombre,
                       t.nombre AS plantilla_nombre, t.tipo AS plantilla_tipo,
                       tt.id AS tipo_tarea_id, tt.nombre AS tipo_tarea_nombre, tt.icono AS tipo_tarea_icono,
                       tc.descripcion AS tarea_descripcion, tc.enlace AS tarea_enlace, tc.enlace_nombre AS tarea_enlace_nombre,
@@ -789,7 +789,7 @@ module.exports = function registrarRutasCalendario(app) {
     if (!puedeGestionarTurnos(req.usuario, sucursal_id)) return res.status(403).json({ error: 'No podés gestionar los turnos de esta sucursal' });
     try {
       const { rows: pendientes } = await db.query(
-        `SELECT e.*, u.nombre AS responsable_nombre FROM schedule_events e LEFT JOIN usuarios u ON u.id = e.responsable_user_id
+        `SELECT e.*, ${db.nombreCompletoSql('u')} AS responsable_nombre FROM schedule_events e LEFT JOIN usuarios u ON u.id = e.responsable_user_id
          WHERE e.tipo = 'TURNO' AND e.sucursal_id = $1 AND e.asignacion_confirmada = false
            AND e.fecha_hora >= $2 AND e.fecha_hora < ($3::date + 1)`,
         [sucursal_id, desde, hasta]
@@ -814,7 +814,7 @@ module.exports = function registrarRutasCalendario(app) {
     if (!ids.length) return res.status(400).json({ error: 'Falta el campo: ids' });
     try {
       const { rows: eventos } = await db.query(
-        `SELECT e.*, u.nombre AS responsable_nombre FROM schedule_events e LEFT JOIN usuarios u ON u.id = e.responsable_user_id
+        `SELECT e.*, ${db.nombreCompletoSql('u')} AS responsable_nombre FROM schedule_events e LEFT JOIN usuarios u ON u.id = e.responsable_user_id
          WHERE e.id = ANY($1) AND e.tipo = 'TURNO'`,
         [ids]
       );
@@ -862,7 +862,7 @@ module.exports = function registrarRutasCalendario(app) {
 
   // Solicitudes de revisión pendientes, para que Gerente/Admin/Auditor las resuelva.
   app.get('/api/calendario/solicitudes', async (req, res) => {
-    let sql = `SELECT e.*, s.nombre AS sucursal_nombre, u.nombre AS responsable_nombre
+    let sql = `SELECT e.*, s.nombre AS sucursal_nombre, ${db.nombreCompletoSql('u')} AS responsable_nombre
                FROM schedule_events e
                JOIN sucursales s ON s.id = e.sucursal_id
                LEFT JOIN usuarios u ON u.id = e.responsable_user_id

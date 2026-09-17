@@ -58,4 +58,13 @@ async function bulkInsert(client, tabla, columnas, filas, returning = 'id') {
   return rows;
 }
 
-module.exports = { pool, query, bulkInsert };
+// Fragmento SQL para el nombre completo de un usuario (nombre de pila +
+// apellido opcional) - `alias` es el alias de tabla de `usuarios` en el
+// JOIN (ej. 'u', 'cu', 'cp'). Se usa en todos los SELECT que muestran el
+// nombre de una persona a otro usuario (historial, calendario, licencias,
+// etc.) para que el apellido aparezca ahi tambien en cuanto se carga.
+function nombreCompletoSql(alias) {
+  return `TRIM(${alias}.nombre || ' ' || COALESCE(${alias}.apellido, ''))`;
+}
+
+module.exports = { pool, query, bulkInsert, nombreCompletoSql };

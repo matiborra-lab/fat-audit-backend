@@ -166,7 +166,7 @@ async function verificarRecordatoriosCumpleanos() {
   const { rows: sucursales } = await db.query('SELECT id FROM sucursales WHERE activo = true');
   for (const s of sucursales) {
     const { rows: colaboradores } = await db.query(
-      `SELECT id AS usuario_id, nombre, fecha_nacimiento FROM usuarios
+      `SELECT id AS usuario_id, TRIM(nombre || ' ' || COALESCE(apellido, '')) AS nombre, fecha_nacimiento FROM usuarios
        WHERE sucursal_id = $1 AND activo = true AND rol IN ('GERENTE','COLABORADOR') AND fecha_nacimiento IS NOT NULL`,
       [s.id]
     );

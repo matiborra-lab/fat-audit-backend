@@ -239,7 +239,7 @@ module.exports = function registrarRutasRuns(app) {
   // (sucursal, auditor) que necesita el PDF y no vienen en audit_runs.
   async function cargarRunParaPdf(runId) {
     const { rows } = await db.query(
-      `SELECT r.*, s.nombre AS sucursal_nombre, u.nombre AS auditor_nombre
+      `SELECT r.*, s.nombre AS sucursal_nombre, ${db.nombreCompletoSql('u')} AS auditor_nombre
        FROM audit_runs r JOIN sucursales s ON s.id = r.sucursal_id JOIN usuarios u ON u.id = r.auditor_user_id
        WHERE r.id = $1`,
       [runId]

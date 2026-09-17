@@ -40,7 +40,7 @@ async function requireAuth(req, res, next) {
   try {
     const payload = verificarToken(token);
     const { rows } = await db.query(
-      'SELECT rol, sucursal_id, activo, email, nombre, tutorial_completado_en FROM usuarios WHERE id = $1',
+      "SELECT rol, sucursal_id, activo, email, TRIM(nombre || ' ' || COALESCE(apellido, '')) AS nombre, tutorial_completado_en FROM usuarios WHERE id = $1",
       [payload.usuarioId]
     );
     const fila = rows[0];

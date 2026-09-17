@@ -39,7 +39,7 @@ module.exports = function registrarRutasComunicados(app) {
     if (!sucursal_id && todas !== 'true') return res.status(400).json({ error: 'Falta sucursal_id o todas=true' });
     try {
       const params = [];
-      let sql = `SELECT u.id, u.nombre, u.email, u.rol, u.puesto, u.sucursal_id, s.nombre AS sucursal_nombre
+      let sql = `SELECT u.id, ${db.nombreCompletoSql('u')} AS nombre, u.email, u.rol, u.puesto, u.sucursal_id, s.nombre AS sucursal_nombre
                  FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id
                  WHERE u.activo = true`;
       if (sucursal_id) { params.push(sucursal_id); sql += ` AND u.sucursal_id = $${params.length}`; }
@@ -66,7 +66,7 @@ module.exports = function registrarRutasComunicados(app) {
   app.get('/api/comunicados', requireAdmin, async (req, res) => {
     try {
       const { rows } = await db.query(
-        `SELECT c.*, u.nombre AS creado_por_nombre FROM comunicados c
+        `SELECT c.*, ${db.nombreCompletoSql('u')} AS creado_por_nombre FROM comunicados c
          LEFT JOIN usuarios u ON u.id = c.creado_por
          ORDER BY COALESCE(c.fecha_envio, c.creado_en) DESC LIMIT 100`
       );

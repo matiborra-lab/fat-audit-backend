@@ -35,8 +35,8 @@ module.exports = function registrarRutasLicencias(app) {
     // (mismo ajuste que ya usan feriados/fecha_nacimiento).
     let sql = `SELECT l.id, l.usuario_id, l.motivo, l.detalle, l.creado_por, l.creado_en,
                       to_char(l.fecha_desde, 'YYYY-MM-DD') AS fecha_desde, to_char(l.fecha_hasta, 'YYYY-MM-DD') AS fecha_hasta,
-                      u.nombre AS usuario_nombre, u.email AS usuario_email, u.rol AS usuario_rol,
-                      u.sucursal_id, s.nombre AS sucursal_nombre, cp.nombre AS creado_por_nombre
+                      ${db.nombreCompletoSql('u')} AS usuario_nombre, u.email AS usuario_email, u.rol AS usuario_rol,
+                      u.sucursal_id, s.nombre AS sucursal_nombre, ${db.nombreCompletoSql('cp')} AS creado_por_nombre
                FROM licencias l
                JOIN usuarios u ON u.id = l.usuario_id
                LEFT JOIN sucursales s ON s.id = u.sucursal_id
@@ -119,7 +119,7 @@ module.exports = function registrarRutasLicencias(app) {
     const { desde, hasta } = req.query;
     let sql = `SELECT l.id, l.usuario_id, l.motivo, l.detalle,
                       to_char(l.fecha_desde, 'YYYY-MM-DD') AS fecha_desde, to_char(l.fecha_hasta, 'YYYY-MM-DD') AS fecha_hasta,
-                      u.nombre AS usuario_nombre
+                      ${db.nombreCompletoSql('u')} AS usuario_nombre
                FROM licencias l JOIN usuarios u ON u.id = l.usuario_id
                WHERE u.sucursal_id = $1`;
     const params = [req.params.id];
