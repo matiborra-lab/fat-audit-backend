@@ -107,6 +107,20 @@ module.exports = function registrarRutasNotificaciones(app) {
     }
   });
 
+  // Detalle de UNA notificación propia - la usa la vista "Ver comunicado
+  // completo" (deep link desde el push o desde la campana, ver
+  // CampanaNotificaciones en Layout.jsx). Mismo criterio de pertenencia
+  // que /leida (siempre la propia).
+  app.get('/api/notificaciones/:id', async (req, res) => {
+    try {
+      const { rows } = await db.query('SELECT * FROM notificaciones WHERE id = $1 AND usuario_id = $2', [req.params.id, req.usuario.usuarioId]);
+      if (!rows[0]) return res.status(404).json({ error: 'Notificación no encontrada' });
+      res.json(rows[0]);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
   app.post('/api/notificaciones/:id/leida', async (req, res) => {
     try {
       const { rows } = await db.query(
@@ -132,3 +146,4 @@ module.exports = function registrarRutasNotificaciones(app) {
 
 module.exports.crearNotificacion = crearNotificacion;
 module.exports.crearNotificaciones = crearNotificaciones;
+module.exports.empujarPushSeguro = empujarPushSeguro;

@@ -28,14 +28,16 @@ const EXTENSIONES_VALIDAS = {
 };
 
 // Genera una URL firmada de subida (valida 5 minutos) + la URL publica final
-// donde va a quedar el archivo una vez subido.
-async function urlDeSubida({ contentType, runId }) {
+// donde va a quedar el archivo una vez subido. `carpeta` agrupa por tipo de
+// uso dentro del bucket (default 'auditorias', el original - los comunicados
+// usan 'comunicados' para no mezclarse con evidencia de auditorías).
+async function urlDeSubida({ contentType, runId, carpeta = 'auditorias' }) {
   const ext = EXTENSIONES_VALIDAS[contentType];
   if (!ext) throw new Error('Tipo de archivo no soportado: ' + contentType);
   const client = clienteS3();
   if (!client) throw new Error('El storage de evidencia no esta configurado (falta S3_ENDPOINT en el backend)');
 
-  const key = `auditorias/${runId}/${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`;
+  const key = `${carpeta}/${runId}/${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`;
   const bucket = process.env.S3_BUCKET;
   const comando = new PutObjectCommand({ Bucket: bucket, Key: key, ContentType: contentType });
   const uploadUrl = await getSignedUrl(client, comando, { expiresIn: 300 });

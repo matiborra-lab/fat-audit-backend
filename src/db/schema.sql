@@ -493,3 +493,37 @@ CREATE TABLE licencias (
 );
 CREATE INDEX idx_licencias_usuario ON licencias (usuario_id);
 CREATE INDEX idx_licencias_fechas ON licencias (fecha_desde, fecha_hasta);
+
+-- ============================================================
+-- COMUNICADOS (Admin -> notificaciones masivas)
+-- ============================================================
+
+-- Anuncio armado por un Admin y mandado a un publico elegido (ver
+-- audiencia_json) - genera una fila en `notificaciones` (tipo 'COMUNICADO')
+-- por cada destinatario resuelto al momento del envio, personalizada con
+-- variables {nombre}/{usuario}/{sucursal}/{fecha} (ver
+-- src/comunicados/index.js). titulo/descripcion son la PLANTILLA sin
+-- interpolar - lo ya enviado queda en notificaciones.titulo/cuerpo, ya
+-- personalizado por destinatario.
+CREATE TABLE comunicados (
+  id                SERIAL PRIMARY KEY,
+  titulo            TEXT NOT NULL,           -- encabezado del push - siempre presente
+  descripcion       TEXT,                    -- opcional: si esta (o imagen o enlace), el comunicado es "completo"
+                                              -- (se puede abrir para ver todo); si no, es solo push, no lleva a ningun lado
+  imagen_url        TEXT,                    -- opcional, se ve al abrir el comunicado completo
+  enlace            TEXT,                    -- opcional
+  enlace_nombre     TEXT,                    -- opcional, texto del boton - fallback "Ver más" en la app
+  audiencia_json    JSONB NOT NULL,           -- lista de criterios mixta, mismo patron que TAREA
+                                              -- (ver resolverResponsablesTarea en calendario.js):
+                                              -- [{tipo:'PERSONA',user_id} | {tipo:'PUESTO',puesto,sucursal_id} (responsables
+                                              -- del sector, resuelto por turno real el dia del envio) |
+                                              -- {tipo:'TODOS_SUCURSAL'|'GERENTES_SUCURSAL',sucursal_id} |
+                                              -- {tipo:'TODOS'|'GERENTES'} (todas las sucursales)]
+  fecha_envio       TIMESTAMPTZ,              -- NULL = se manda de inmediato al crear; con valor, lo manda el
+                                              -- scheduler cuando llegue esa fecha/hora (ver iniciarSchedulerComunicados)
+  enviado_en        TIMESTAMPTZ,
+  cantidad_enviados INTEGER,
+  creado_por        INTEGER REFERENCES usuarios(id) ON DELETE SET NULL,
+  creado_en         TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_comunicados_pendientes ON comunicados (fecha_envio) WHERE enviado_en IS NULL;

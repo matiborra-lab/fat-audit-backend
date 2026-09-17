@@ -621,6 +621,7 @@ const notificacionPreferencias = require('./notificacion-preferencias');
 const reportes = require('./reportes');
 const tareas = require('./tareas');
 const licencias = require('./licencias');
+const comunicados = require('./comunicados');
 plantillas(app);
 runs(app);
 historial(app);
@@ -630,6 +631,7 @@ notificacionPreferencias(app);
 reportes(app);
 tareas(app);
 licencias(app);
+comunicados(app);
 
 const { iniciarScheduler } = require('../reportes');
 iniciarScheduler();
@@ -639,6 +641,9 @@ iniciarSchedulerRecordatorios();
 
 const { iniciarSchedulerFeriados } = require('../feriados');
 iniciarSchedulerFeriados();
+
+const { iniciarSchedulerComunicados } = require('../comunicados');
+iniciarSchedulerComunicados();
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FAT Audit backend escuchando en :${PORT}`));
