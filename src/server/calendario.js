@@ -112,12 +112,14 @@ function diaSemanaDeFecha(fechaISO) {
   return new Date(`${fechaISO}T00:00:00`).getDay();
 }
 
-// Recurrencia de una TAREA (a diferencia de los turnos, acá la hora la elige
-// libremente quien programa - no depende de sucursal_horarios_turno). Si no
-// se pasa horaHHMM, cada ocurrencia queda al inicio del día (00:00) y el
-// caller marca hora_definida = false (ver POST /api/calendario/tareas/programar).
-// Repetición diaria de una TAREA (sin elegir días puntuales) - una ocurrencia
-// por cada día del rango, todos los días de la semana.
+// Recurrencia rica compartida por TAREA y AUDITORIA (a diferencia de los
+// turnos, acá la hora la elige libremente quien programa - no depende de
+// sucursal_horarios_turno). Si no se pasa horaHHMM, cada ocurrencia queda al
+// inicio del día (00:00) y el caller marca hora_definida = false (ver POST
+// /api/calendario/tareas/programar y el bloque usaRecurrenciaRica de POST
+// /api/calendario).
+// Repetición diaria (sin elegir días puntuales) - una ocurrencia por cada
+// día del rango, todos los días de la semana.
 function generarFechasTareaDiaria(fechaDesde, fechaHasta, horaHHMM) {
   const desde = new Date(`${fechaDesde}T00:00:00`);
   const hasta = fechaHasta ? new Date(`${fechaHasta}T23:59:59`) : new Date(desde.getTime() + DIAS_VENTANA_SIN_FIN * 86400000);
@@ -231,7 +233,11 @@ module.exports = function registrarRutasCalendario(app) {
                         WHEN e.estado != 'PENDIENTE' THEN e.estado
                         WHEN e.tipo = 'TAREA' AND e.hora_definida AND now() > e.fecha_hora + interval '12 hours' THEN 'DEMORADA'
                         WHEN e.tipo = 'TAREA' AND NOT e.hora_definida AND now() > date_trunc('day', e.fecha_hora) + interval '1 day' THEN 'DEMORADA'
-                        WHEN e.tipo != 'TAREA' AND e.fecha_hora < now() THEN 'VENCIDA'
+                        -- Auditoría sin hora (agendada "para hoy", sin horario puntual): igual
+                        -- criterio que una tarea sin hora - vencida recién al otro día, no a
+                        -- medianoche del mismo día que se agendó.
+                        WHEN e.tipo != 'TAREA' AND NOT e.hora_definida AND now() > date_trunc('day', e.fecha_hora) + interval '1 day' THEN 'VENCIDA'
+                        WHEN e.tipo != 'TAREA' AND e.hora_definida AND e.fecha_hora < now() THEN 'VENCIDA'
                         ELSE e.estado
                       END AS estado_efectivo
                FROM schedule_events e
@@ -304,12 +310,28 @@ module.exports = function registrarRutasCalendario(app) {
 
   // Body: { sucursal_id, tipo, template_id (AUDITORIA), tarea_catalogo_id (TAREA),
   // foto_requerida (TAREA "Otro"), titulo, descripcion, responsable_user_id,
-  // fecha_hora, duracion_minutos, recurrencia,
+  // TAREA/EVENTO_ESPECIAL: fecha_hora, duracion_minutos, recurrencia simple {tipo,hasta},
+  // AUDITORIA: misma recurrencia rica que /api/calendario/tareas/programar -
+  //   fecha_desde (obligatorio, el frontend ya lo manda "hoy" si no se eligió),
+  //   fecha_hasta (opcional), hora (opcional - sin hora = "pendiente para hoy",
+  //   ver hora_definida), frecuencia: 'NINGUNA'|'DIARIA'|'SEMANAL'|'MENSUAL',
+  //   dias_semana[] (SEMANAL) | dias_mes[] (MENSUAL),
   // todas_sucursales | sucursal_ids[] | sucursal_id (EVENTO_ESPECIAL) }
   app.post('/api/calendario', async (req, res) => {
-    const { sucursal_id, sucursal_ids, tipo, template_id, tarea_catalogo_id, foto_requerida, titulo, descripcion, responsable_user_id, fecha_hora, duracion_minutos, recurrencia, todas_sucursales, hora_definida } = req.body;
-    if (!tipo || !fecha_hora) return res.status(400).json({ error: 'Faltan campos: tipo, fecha_hora' });
+    const {
+      sucursal_id, sucursal_ids, tipo, template_id, tarea_catalogo_id, foto_requerida, titulo, descripcion,
+      responsable_user_id, fecha_hora, duracion_minutos, recurrencia, todas_sucursales, hora_definida,
+      fecha_desde, fecha_hasta, frecuencia, dias_semana, dias_mes, hora,
+    } = req.body;
+    if (!tipo) return res.status(400).json({ error: 'Falta el campo: tipo' });
     if (!['AUDITORIA', 'SEGUIMIENTO', 'TAREA', 'EVENTO_ESPECIAL'].includes(tipo)) return res.status(400).json({ error: 'tipo inválido' });
+    // Una AUDITORIA agendada desde el calendario usa la misma recurrencia
+    // rica que las tareas (dias puntuales + hora opcional) - el resto sigue
+    // con fecha_hora obligatoria + `recurrencia` simple (repite indefinido
+    // en el mismo dia de semana/mes hasta una fecha limite).
+    const usaRecurrenciaRica = tipo === 'AUDITORIA';
+    if (!usaRecurrenciaRica && !fecha_hora) return res.status(400).json({ error: 'Faltan campos: tipo, fecha_hora' });
+    if (usaRecurrenciaRica && !fecha_desde) return res.status(400).json({ error: 'Falta fecha_desde' });
 
     // Evento especial (feriado/promo): sin plantilla, alcance de una sucursal,
     // varias elegidas a mano, o todas a la vez (una fila por sucursal,
@@ -375,7 +397,27 @@ module.exports = function registrarRutasCalendario(app) {
     if (!tituloFinal) return res.status(400).json({ error: 'Falta el título' });
     const evidenciaObligatoria = tipo === 'TAREA' ? !!(tareaCatalogo ? tareaCatalogo.foto_requerida : foto_requerida) : false;
 
-    const fechas = generarFechas(fecha_hora, recurrencia);
+    let fechas;
+    let horaDefinidaFinal;
+    if (usaRecurrenciaRica) {
+      if (frecuencia === 'SEMANAL') {
+        if (!Array.isArray(dias_semana) || !dias_semana.length) return res.status(400).json({ error: 'Falta dias_semana' });
+        fechas = generarFechasTareaPorDiaSemana(fecha_desde, fecha_hasta || null, dias_semana, hora || null);
+      } else if (frecuencia === 'MENSUAL') {
+        if (!Array.isArray(dias_mes) || !dias_mes.length) return res.status(400).json({ error: 'Falta dias_mes' });
+        fechas = generarFechasTareaPorDiaDelMes(fecha_desde, fecha_hasta || null, dias_mes, hora || null);
+      } else if (frecuencia === 'DIARIA') {
+        fechas = generarFechasTareaDiaria(fecha_desde, fecha_hasta || null, hora || null);
+      } else {
+        // NINGUNA - una sola ocurrencia, el mismo dia como desde y hasta.
+        fechas = generarFechasTareaDiaria(fecha_desde, fecha_desde, hora || null);
+      }
+      if (!fechas.length) return res.status(400).json({ error: 'El rango de fechas no generó ninguna ocurrencia' });
+      horaDefinidaFinal = !!hora;
+    } else {
+      fechas = generarFechas(fecha_hora, recurrencia);
+      horaDefinidaFinal = tipo === 'TAREA' ? hora_definida !== false : true;
+    }
     try {
       const responsables = tipo === 'TAREA'
         ? resolverResponsablesTarea(req.body)
@@ -385,7 +427,7 @@ module.exports = function registrarRutasCalendario(app) {
         sucursal_id, tipo, tipo === 'TAREA' ? null : template_id, tituloFinal, descripcion || null,
         r.userId, f.toISOString(), duracion_minutos || null, req.usuario.usuarioId,
         tipo === 'TAREA' ? (tarea_catalogo_id || null) : null, evidenciaObligatoria,
-        tipo === 'TAREA' ? hora_definida !== false : true, r.puesto, r.turnoTipo,
+        horaDefinidaFinal, r.puesto, r.turnoTipo,
       ]));
       const insertados = await db.bulkInsert(db.pool, 'schedule_events',
         ['sucursal_id', 'tipo', 'template_id', 'titulo', 'descripcion', 'responsable_user_id', 'fecha_hora', 'duracion_minutos', 'creado_por', 'tarea_catalogo_id', 'evidencia_obligatoria', 'hora_definida', 'puesto', 'turno_tipo'],

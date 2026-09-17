@@ -32,8 +32,15 @@ function normalizarValor(item, valorJson) {
       if (isNaN(n)) return null;
       return clamp01((n - 1) / 9);
     }
-    case 'SI_NO':
-      return valorJson === 'SI' || valorJson === true ? 1 : 0;
+    case 'SI_NO': {
+      // opciones_json.correcta indica cuál respuesta puntúa a favor - por
+      // defecto "SI" (compatibilidad con ítems creados antes de este campo,
+      // donde "Sí" siempre sumaba). Sirve para preguntas en negativo (ej.
+      // "¿Hay insectos visibles?", donde "No" es la respuesta que puntúa).
+      const correcta = item.opciones_json?.correcta === 'NO' ? 'NO' : 'SI';
+      const esSi = valorJson === 'SI' || valorJson === true;
+      return esSi === (correcta === 'SI') ? 1 : 0;
+    }
     case 'CHECKBOX':
       return valorJson === true ? 1 : 0;
     case 'OPCION_MULTIPLE': {
