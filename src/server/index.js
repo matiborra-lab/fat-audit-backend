@@ -626,6 +626,8 @@ const reportes = require('./reportes');
 const tareas = require('./tareas');
 const licencias = require('./licencias');
 const comunicados = require('./comunicados');
+const storage = require('./storage');
+storage(app);
 plantillas(app);
 runs(app);
 historial(app);

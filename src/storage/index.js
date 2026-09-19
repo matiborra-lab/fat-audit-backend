@@ -6,7 +6,7 @@
  * via evidencias. Esto evita que fotos/videos pesados pasen por el backend.
  */
 
-const { S3Client, PutObjectCommand, GetBucketCorsCommand, PutBucketCorsCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, DeleteObjectCommand, GetBucketCorsCommand, PutBucketCorsCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const crypto = require('crypto');
 
@@ -93,4 +93,84 @@ async function urlDeSubida({ contentType, runId, carpeta = 'auditorias' }) {
   return { uploadUrl, publicUrl, key };
 }
 
-module.exports = { urlDeSubida, asegurarCorsDelBucket };
+// Sube el archivo desde el propio servidor (el navegador se lo manda a la
+// API, que ya tiene CORS resuelto) - alternativa a la URL firmada cuando el
+// navegador no puede hablar directo con el bucket. Para archivos livianos
+// (fotos): un video largo no entra en el límite de la ruta que la usa.
+async function subirDesdeServidor({ buffer, contentType, carpeta, runId }) {
+  const ext = EXTENSIONES_VALIDAS[contentType];
+  if (!ext) throw new Error('Tipo de archivo no soportado: ' + contentType);
+  const client = clienteS3();
+  if (!client) throw new Error('El storage de evidencia no esta configurado (falta S3_ENDPOINT en el backend)');
+  const key = `${carpeta}/${runId}/${Date.now()}-${crypto.randomBytes(6).toString('hex')}.${ext}`;
+  await client.send(new PutObjectCommand({ Bucket: process.env.S3_BUCKET, Key: key, Body: buffer, ContentType: contentType }));
+  const publicUrl = (process.env.S3_PUBLIC_URL || '').replace(/\/$/, '') + '/' + key;
+  return { publicUrl, key };
+}
+
+// Prueba cada eslabón por separado (credenciales/bucket, firma de la URL,
+// CORS para el navegador, lectura pública) y devuelve un resultado por paso
+// en vez de un error genérico - sin credenciales ni URLs firmadas en la
+// respuesta. Deja un archivito de prueba y lo borra al final.
+async function diagnosticar({ origen }) {
+  const pasos = [];
+  const paso = (nombre, ok, detalle) => pasos.push({ nombre, ok, detalle });
+  const client = clienteS3();
+  const bucket = process.env.S3_BUCKET;
+  const publicBase = (process.env.S3_PUBLIC_URL || '').replace(/\/$/, '');
+
+  const faltantes = ['S3_ENDPOINT', 'S3_BUCKET', 'S3_ACCESS_KEY_ID', 'S3_SECRET_ACCESS_KEY', 'S3_PUBLIC_URL'].filter((k) => !process.env[k]);
+  if (faltantes.length) {
+    paso('Configuración', false, 'Faltan variables de entorno en el backend: ' + faltantes.join(', '));
+    return pasos;
+  }
+  let hostEndpoint = process.env.S3_ENDPOINT;
+  try { hostEndpoint = new URL(process.env.S3_ENDPOINT).host; } catch { paso('Configuración', false, 'S3_ENDPOINT no es una URL válida (tiene que empezar con https://)'); return pasos; }
+  paso('Configuración', true, `Endpoint ${hostEndpoint} · bucket "${bucket}" · URL pública ${publicBase}`);
+
+  const key = `diagnostico/${Date.now()}.png`;
+  const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg==', 'base64');
+  let subido = false;
+  try {
+    await client.send(new PutObjectCommand({ Bucket: bucket, Key: key, Body: png, ContentType: 'image/png' }));
+    subido = true;
+    paso('Subir desde el servidor (credenciales y bucket)', true, 'El servidor pudo escribir en el bucket');
+  } catch (err) {
+    paso('Subir desde el servidor (credenciales y bucket)', false, `${err.name}: ${err.message} - revisá S3_ENDPOINT, S3_BUCKET y que las claves tengan permiso de escritura`);
+  }
+
+  if (subido) {
+    try {
+      const resp = await fetch(`${publicBase}/${key}`);
+      paso('Lectura pública de las fotos', resp.ok, resp.ok
+        ? 'La URL pública sirve los archivos'
+        : `La URL pública devolvió ${resp.status} - las fotos se suben pero no se ven: activá el acceso público del bucket (dominio r2.dev o dominio propio) y revisá S3_PUBLIC_URL`);
+    } catch (err) {
+      paso('Lectura pública de las fotos', false, 'No se pudo conectar a S3_PUBLIC_URL: ' + err.message);
+    }
+  }
+
+  try {
+    const url = await getSignedUrl(client, new PutObjectCommand({ Bucket: bucket, Key: `diagnostico/firmada-${Date.now()}.png`, ContentType: 'image/png' }), { expiresIn: 120 });
+    const pre = await fetch(url, { method: 'OPTIONS', headers: { Origin: origen, 'Access-Control-Request-Method': 'PUT', 'Access-Control-Request-Headers': 'content-type' } });
+    const permitido = pre.headers.get('access-control-allow-origin');
+    const ok = pre.ok && (permitido === origen || permitido === '*');
+    paso('Permiso del navegador (CORS) para ' + origen, ok, ok
+      ? 'El bucket acepta subidas directas desde la app'
+      : `El bucket no autoriza a ${origen} (respuesta ${pre.status}, access-control-allow-origin: ${permitido || 'ausente'}) - agregar una regla CORS en el bucket que permita PUT desde ese origen`);
+  } catch (err) {
+    paso('Permiso del navegador (CORS)', false, 'No se pudo probar: ' + err.message);
+  }
+
+  try {
+    const cors = await client.send(new GetBucketCorsCommand({ Bucket: bucket }));
+    paso('Reglas CORS del bucket', (cors.CORSRules || []).length > 0, JSON.stringify(cors.CORSRules || []));
+  } catch (err) {
+    paso('Reglas CORS del bucket', false, err.name === 'NoSuchCORSConfiguration' ? 'El bucket no tiene ninguna regla CORS' : `${err.name}: ${err.message}`);
+  }
+
+  if (subido) await client.send(new DeleteObjectCommand({ Bucket: bucket, Key: key })).catch(() => {});
+  return pasos;
+}
+
+module.exports = { urlDeSubida, subirDesdeServidor, diagnosticar, asegurarCorsDelBucket };
