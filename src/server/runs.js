@@ -95,11 +95,11 @@ function validarCierre(estructura, respuestas, evidenciasPorRespuesta) {
 // (distinto del tipo de evento de calendario, que tiene 'AUDITORIA' en vez
 // de 'MARCA'/'INTERNA' - ver calendario.js). Si no se pasa, se usa el tipo
 // propio de la plantilla.
-async function crearRun({ templateId, sucursalId, tipo, rol, auditorUserId, responsableNombre }) {
+async function crearRun({ templateId, sucursalId, tipo, rol, auditorUserId, responsableNombre, asignadaAlUsuario = false }) {
   const { rows: plantillaRows } = await db.query('SELECT * FROM audit_templates WHERE id = $1 AND estado = $2', [templateId, 'PUBLICADA']);
   const plantilla = plantillaRows[0];
   if (!plantilla) throw Object.assign(new Error('La plantilla no existe o no está publicada'), { status: 400 });
-  if (!plantilla.roles_permitidos.includes(rol)) throw Object.assign(new Error('Tu rol no puede ejecutar esta plantilla'), { status: 403 });
+  if (!asignadaAlUsuario && !plantilla.roles_permitidos.includes(rol)) throw Object.assign(new Error('Tu rol no puede ejecutar esta plantilla'), { status: 403 });
 
   const tipoFinal = tipo || plantilla.tipo;
   // Un Gerente nunca puede ejecutar una auditoría de marca, sin importar lo
@@ -305,7 +305,11 @@ module.exports = function registrarRutasRuns(app) {
            valor_json = EXCLUDED.valor_json, comentario = EXCLUDED.comentario,
            no_aplica = EXCLUDED.no_aplica, actualizado_en = now()
          RETURNING *`,
-        [req.params.id, req.params.itemId, valor_json ?? null, comentario ?? null, no_aplica]
+        // JSON.stringify explícito: pg manda un string JS tal cual ("SI"), que
+        // no es JSON válido para la columna JSONB - solo los números/booleanos/
+        // objetos se serializaban bien, así que toda respuesta de texto (Sí/No,
+        // opción múltiple, texto, fecha) fallaba con 400.
+        [req.params.id, req.params.itemId, valor_json == null ? null : JSON.stringify(valor_json), comentario ?? null, no_aplica]
       );
       res.json(rows[0]);
     } catch (err) {

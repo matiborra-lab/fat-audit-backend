@@ -16,7 +16,7 @@ module.exports = function registrarRutasHistorial(app) {
     const { sucursal_id, tipo, template_id, estado, desde, hasta, puntaje_min, puntaje_max } = req.query;
     let sql = `SELECT r.id, r.template_id, t.nombre AS plantilla_nombre, r.sucursal_id, s.nombre AS sucursal_nombre,
                       r.tipo, r.estado, r.creado_en, r.iniciada_en, r.completada_en, r.puntaje_total, r.semaforo, r.resultado,
-                      ${db.nombreCompletoSql('u')} AS auditor_nombre, r.responsable_nombre, r.origen_run_id
+                      r.auditor_user_id, ${db.nombreCompletoSql('u')} AS auditor_nombre, r.responsable_nombre, r.origen_run_id
                FROM audit_runs r
                JOIN audit_templates t ON t.id = r.template_id
                JOIN sucursales s ON s.id = r.sucursal_id

@@ -226,7 +226,7 @@ module.exports = function registrarRutasCalendario(app) {
     const { desde, hasta, sucursal_id, tipo, estado, responsable_id, tipo_tarea_id } = req.query;
     let sql = `SELECT e.*, s.nombre AS sucursal_nombre, ${db.nombreCompletoSql('u')} AS responsable_nombre,
                       ${db.nombreCompletoSql('cu')} AS creado_por_nombre,
-                      t.nombre AS plantilla_nombre, t.tipo AS plantilla_tipo,
+                      t.nombre AS plantilla_nombre, t.tipo AS plantilla_tipo, ar.estado AS run_estado,
                       tt.id AS tipo_tarea_id, tt.nombre AS tipo_tarea_nombre, tt.icono AS tipo_tarea_icono,
                       tc.descripcion AS tarea_descripcion, tc.enlace AS tarea_enlace, tc.enlace_nombre AS tarea_enlace_nombre,
                       CASE
@@ -245,6 +245,7 @@ module.exports = function registrarRutasCalendario(app) {
                LEFT JOIN usuarios u ON u.id = e.responsable_user_id
                LEFT JOIN usuarios cu ON cu.id = e.creado_por
                LEFT JOIN audit_templates t ON t.id = e.template_id
+               LEFT JOIN audit_runs ar ON ar.id = e.run_id
                LEFT JOIN tareas_catalogo tc ON tc.id = e.tarea_catalogo_id
                LEFT JOIN tipos_tarea tt ON tt.id = tc.tipo_tarea_id
                WHERE 1=1`;
@@ -612,6 +613,11 @@ module.exports = function registrarRutasCalendario(app) {
           templateId: evento.template_id, sucursalId: evento.sucursal_id,
           tipo: evento.tipo === 'SEGUIMIENTO' ? 'SEGUIMIENTO' : undefined,
           rol: req.usuario.rol, auditorUserId: req.usuario.usuarioId, responsableNombre: null,
+          // Quien tiene la auditoría asignada la puede ejecutar aunque su rol
+          // no figure en roles_permitidos de la plantilla (esa lista limita
+          // quién arranca una por su cuenta desde Ejecutar, no a quién se le
+          // asignó puntualmente desde el calendario).
+          asignadaAlUsuario: evento.responsable_user_id === req.usuario.usuarioId,
         });
       }
       await db.query(`UPDATE schedule_events SET estado = 'COMPLETADA', run_id = $1 WHERE id = $2`, [run.id, req.params.id]);

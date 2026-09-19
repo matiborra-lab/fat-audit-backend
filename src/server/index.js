@@ -649,6 +649,8 @@ iniciarSchedulerFeriados();
 const { iniciarSchedulerComunicados } = require('../comunicados');
 iniciarSchedulerComunicados();
 
+require('../storage').asegurarCorsDelBucket();
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`FAT Audit backend escuchando en :${PORT}`));
 

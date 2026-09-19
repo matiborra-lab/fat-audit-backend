@@ -6,7 +6,7 @@
  * via evidencias. Esto evita que fotos/videos pesados pasen por el backend.
  */
 
-const { S3Client, PutObjectCommand } = require('@aws-sdk/client-s3');
+const { S3Client, PutObjectCommand, GetBucketCorsCommand, PutBucketCorsCommand } = require('@aws-sdk/client-s3');
 const { getSignedUrl } = require('@aws-sdk/s3-request-presigner');
 const crypto = require('crypto');
 
@@ -19,7 +19,55 @@ function clienteS3() {
       accessKeyId: process.env.S3_ACCESS_KEY_ID,
       secretAccessKey: process.env.S3_SECRET_ACCESS_KEY,
     },
+    // Desde el SDK 3.729 la URL firmada de subida incluye por default
+    // x-amz-checksum-crc32 / x-amz-sdk-checksum-algorithm (el checksum de un
+    // body vacío) - Cloudflare R2 y otros S3-compatibles lo rechazan cuando
+    // el navegador sube el archivo real, y la subida directa falla con un
+    // error de red opaco ("Load failed" en Safari, "Failed to fetch" en
+    // Chrome). WHEN_REQUIRED deja la URL sin esos parámetros.
+    requestChecksumCalculation: 'WHEN_REQUIRED',
+    responseChecksumValidation: 'WHEN_REQUIRED',
   });
+}
+
+// Los navegadores suben directo al bucket (PUT a la URL firmada), así que el
+// bucket tiene que permitir CORS desde el frontend - un bucket nuevo no trae
+// ninguna regla y la subida falla igual que con el checksum. Se configura
+// solo si el bucket NO tiene ninguna regla (nunca pisa una ya cargada a
+// mano); si algo falla (ej. credenciales sin permiso de administración del
+// bucket) solo se avisa en el log.
+async function asegurarCorsDelBucket() {
+  const client = clienteS3();
+  if (!client || !process.env.S3_BUCKET) return;
+  const origenes = (process.env.FRONTEND_URL || '').split(',').map((o) => o.trim().replace(/\/$/, '')).filter(Boolean);
+  if (!origenes.length) return;
+  try {
+    let existentes = [];
+    try {
+      const actual = await client.send(new GetBucketCorsCommand({ Bucket: process.env.S3_BUCKET }));
+      existentes = actual.CORSRules || [];
+    } catch (err) {
+      if (err.name !== 'NoSuchCORSConfiguration') throw err;
+    }
+    if (existentes.length) {
+      console.log('[storage] el bucket ya tiene reglas CORS, no se toca');
+      return;
+    }
+    await client.send(new PutBucketCorsCommand({
+      Bucket: process.env.S3_BUCKET,
+      CORSConfiguration: {
+        CORSRules: [{
+          AllowedOrigins: origenes,
+          AllowedMethods: ['GET', 'PUT', 'HEAD'],
+          AllowedHeaders: ['*'],
+          MaxAgeSeconds: 3600,
+        }],
+      },
+    }));
+    console.log('[storage] CORS del bucket configurado para: ' + origenes.join(', '));
+  } catch (err) {
+    console.error('[storage] no se pudo revisar/configurar el CORS del bucket (configurarlo a mano en el panel del proveedor):', err.message);
+  }
 }
 
 const EXTENSIONES_VALIDAS = {
@@ -45,4 +93,4 @@ async function urlDeSubida({ contentType, runId, carpeta = 'auditorias' }) {
   return { uploadUrl, publicUrl, key };
 }
 
-module.exports = { urlDeSubida };
+module.exports = { urlDeSubida, asegurarCorsDelBucket };
