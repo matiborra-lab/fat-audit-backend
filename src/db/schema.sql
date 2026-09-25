@@ -563,7 +563,7 @@ CREATE TABLE merc_pedidos (
   sucursal_id INTEGER NOT NULL REFERENCES sucursales(id),
   usuario_id  INTEGER NOT NULL REFERENCES usuarios(id),   -- quien lo hizo
   estado      TEXT NOT NULL DEFAULT 'PENDIENTE_CONFIRMAR'
-              CHECK (estado IN ('PENDIENTE_CONFIRMAR', 'CONFIRMADO', 'LISTO_RETIRAR', 'RETIRADO')),
+              CHECK (estado IN ('PENDIENTE_CONFIRMAR', 'CONFIRMADO', 'LISTO_RETIRAR', 'RETIRADO', 'CANCELADO')),
   total       NUMERIC(14,2) NOT NULL CHECK (total >= 0),
   abonado     NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (abonado >= 0 AND abonado <= total),
                                                      -- saldo pendiente = total - abonado; se actualiza SOLO al registrar un pago
@@ -626,3 +626,27 @@ CREATE TABLE merc_auditoria (
   detalle    JSONB,
   creado_en  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+-- Ediciones de un pedido hechas por la marca antes del retiro: qué cambió y
+-- cómo quedó el total (el pedido se marca "editado" y el gerente recibe aviso).
+CREATE TABLE merc_pedido_ediciones (
+  id             SERIAL PRIMARY KEY,
+  pedido_id      INTEGER NOT NULL REFERENCES merc_pedidos(id),
+  usuario_id     INTEGER NOT NULL REFERENCES usuarios(id),
+  total_anterior NUMERIC(14,2) NOT NULL,
+  total_nuevo    NUMERIC(14,2) NOT NULL,
+  cambios        JSONB NOT NULL,          -- [{ tipo: QUITADO|AGREGADO|CANTIDAD|PRECIO, nombre, texto, ... }]
+  creado_en      TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_merc_ediciones_pedido ON merc_pedido_ediciones (pedido_id, creado_en);
+
+-- Categorías del catálogo, con orden manual (flechas arriba/abajo), y orden
+-- manual de los productos dentro de cada categoría.
+CREATE TABLE merc_categorias (
+  id        SERIAL PRIMARY KEY,
+  nombre    TEXT NOT NULL,
+  orden     INTEGER NOT NULL DEFAULT 0,
+  creado_en TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+ALTER TABLE merc_productos ADD COLUMN categoria_id INTEGER REFERENCES merc_categorias(id);
+ALTER TABLE merc_productos ADD COLUMN orden INTEGER NOT NULL DEFAULT 0;

@@ -19,12 +19,12 @@
 
 const db = require('../db');
 const { urlDeSubida } = require('../storage');
-const { crearNotificaciones } = require('./notificaciones');
+const { crearNotificaciones, crearNotificacion } = require('./notificaciones');
 const { generarPdfSaldos, generarPdfDocumentos } = require('../pdf/mercaderia');
 
-const ESTADOS = ['PENDIENTE_CONFIRMAR', 'CONFIRMADO', 'LISTO_RETIRAR', 'RETIRADO'];
+const ESTADOS = ['PENDIENTE_CONFIRMAR', 'CONFIRMADO', 'LISTO_RETIRAR', 'RETIRADO', 'CANCELADO'];
 const ETIQUETA_ESTADO = {
-  PENDIENTE_CONFIRMAR: 'Pendiente de confirmar', CONFIRMADO: 'Confirmado', LISTO_RETIRAR: 'Listo para retirar', RETIRADO: 'Retirado',
+  PENDIENTE_CONFIRMAR: 'Pendiente de confirmar', CONFIRMADO: 'Confirmado', LISTO_RETIRAR: 'Listo para retirar', RETIRADO: 'Retirado', CANCELADO: 'Cancelado',
 };
 
 const esMarca = (u) => u.personal_marca === true;
@@ -56,9 +56,12 @@ async function auditar(cliente, accion, entidad, entidadId, usuarioId, detalle) 
 const SELECT_PEDIDO = `
   SELECT p.id, p.sucursal_id, s.nombre AS sucursal_nombre, p.usuario_id,
          ${db.nombreCompletoSql('u')} AS responsable_nombre,
-         p.creado_en, p.total::float8 AS total, p.abonado::float8 AS abonado, (p.total - p.abonado)::float8 AS saldo,
+         p.creado_en, p.total::float8 AS total, p.abonado::float8 AS abonado,
+         -- un pedido cancelado no genera deuda: su saldo es siempre 0
+         (CASE WHEN p.estado = 'CANCELADO' THEN 0 ELSE p.total - p.abonado END)::float8 AS saldo,
          p.estado,
-         CASE WHEN p.total > p.abonado THEN 'PENDIENTE_COBRO' ELSE 'ABONADO' END AS estado_cobro,
+         CASE WHEN p.estado = 'CANCELADO' THEN 'NO_APLICA' WHEN p.total > p.abonado THEN 'PENDIENTE_COBRO' ELSE 'ABONADO' END AS estado_cobro,
+         EXISTS (SELECT 1 FROM merc_pedido_ediciones e WHERE e.pedido_id = p.id) AS editado,
          p.retirado_en,
          CASE WHEN p.retirado_en IS NOT NULL THEN (now()::date - p.retirado_en::date) END AS dias_demora
   FROM merc_pedidos p
@@ -75,9 +78,9 @@ function armarFiltros(usuario, q) {
   if (!esMarca(usuario)) agregar('p.sucursal_id = ?', usuario.sucursal_id);
   else if (q.sucursal_id) agregar('p.sucursal_id = ?', Number(q.sucursal_id));
   if (q.estado) agregar('p.estado = ?', q.estado);
-  if (q.cobro === 'PENDIENTE_COBRO') cond.push('p.total > p.abonado');
-  if (q.cobro === 'ABONADO') cond.push('p.total <= p.abonado');
-  if (q.con_saldo === '1') cond.push('p.total > p.abonado');
+  if (q.cobro === 'PENDIENTE_COBRO') cond.push("p.estado <> 'CANCELADO' AND p.total > p.abonado");
+  if (q.cobro === 'ABONADO') cond.push("p.estado <> 'CANCELADO' AND p.total <= p.abonado");
+  if (q.con_saldo === '1') cond.push("p.estado <> 'CANCELADO' AND p.total > p.abonado");
   if (q.usuario_id) agregar('p.usuario_id = ?', Number(q.usuario_id));
   if (q.desde) agregar('p.creado_en >= ?::date', q.desde);
   if (q.hasta) agregar("p.creado_en < (?::date + 1)", q.hasta);
@@ -96,8 +99,11 @@ module.exports = function registrarRutasMercaderia(app) {
     if (todos && !esMarca(req.usuario)) return res.status(403).json({ error: 'Esta acción es solo para Personal de Marca' });
     try {
       const { rows } = await db.query(
-        `SELECT id, nombre, descripcion, imagen_url, precio::float8 AS precio, activo, actualizado_en
-         FROM merc_productos ${todos ? '' : 'WHERE activo = true'} ORDER BY nombre`
+        `SELECT p.id, p.nombre, p.descripcion, p.imagen_url, p.precio::float8 AS precio, p.activo, p.actualizado_en,
+                p.categoria_id, c.nombre AS categoria_nombre
+         FROM merc_productos p LEFT JOIN merc_categorias c ON c.id = p.categoria_id
+         ${todos ? '' : 'WHERE p.activo = true'}
+         ORDER BY c.orden NULLS LAST, c.id NULLS LAST, p.orden, p.nombre`
       );
       res.json(rows);
     } catch (err) {
@@ -114,16 +120,23 @@ module.exports = function registrarRutasMercaderia(app) {
   });
 
   app.post('/api/merc/productos', requireMarca, async (req, res) => {
-    const { nombre, descripcion, imagen_url, precio } = req.body;
+    const { nombre, descripcion, imagen_url, precio, categoria_id } = req.body;
     if (!nombre?.trim()) return res.status(400).json({ error: 'Falta el nombre del producto' });
     if (precio === undefined || precio === '' || !(Number(precio) >= 0)) return res.status(400).json({ error: 'El precio no es válido' });
     const cliente = await db.pool.connect();
     try {
       await cliente.query('BEGIN');
+      const catId = categoria_id ? Number(categoria_id) : null;
+      if (catId && !(await cliente.query('SELECT 1 FROM merc_categorias WHERE id = $1', [catId])).rows[0]) {
+        await cliente.query('ROLLBACK');
+        return res.status(400).json({ error: 'La categoría no existe' });
+      }
+      // Va al final de su categoría.
+      const { rows: [ord] } = await cliente.query('SELECT COALESCE(MAX(orden), -1) + 1 AS siguiente FROM merc_productos WHERE categoria_id IS NOT DISTINCT FROM $1', [catId]);
       const { rows } = await cliente.query(
-        `INSERT INTO merc_productos (nombre, descripcion, imagen_url, precio, creado_por) VALUES ($1,$2,$3,$4,$5)
-         RETURNING id, nombre, descripcion, imagen_url, precio::float8 AS precio, activo`,
-        [nombre.trim(), descripcion?.trim() || null, imagen_url || null, deCentavos(aCentavos(precio)), req.usuario.usuarioId]
+        `INSERT INTO merc_productos (nombre, descripcion, imagen_url, precio, creado_por, categoria_id, orden) VALUES ($1,$2,$3,$4,$5,$6,$7)
+         RETURNING id, nombre, descripcion, imagen_url, precio::float8 AS precio, activo, categoria_id`,
+        [nombre.trim(), descripcion?.trim() || null, imagen_url || null, deCentavos(aCentavos(precio)), req.usuario.usuarioId, catId, ord.siguiente]
       );
       await auditar(cliente, 'PRODUCTO_CREADO', 'producto', rows[0].id, req.usuario.usuarioId, { nombre: rows[0].nombre, precio: rows[0].precio });
       await cliente.query('COMMIT');
@@ -139,7 +152,7 @@ module.exports = function registrarRutasMercaderia(app) {
   // Editar datos, cambiar el precio rápido o (des)habilitar - nunca se borra
   // un producto (los pedidos históricos lo siguen referenciando).
   app.patch('/api/merc/productos/:id', requireMarca, async (req, res) => {
-    const { nombre, descripcion, imagen_url, precio, activo } = req.body;
+    const { nombre, descripcion, imagen_url, precio, activo, categoria_id } = req.body;
     if (nombre !== undefined && !String(nombre).trim()) return res.status(400).json({ error: 'El nombre no puede quedar vacío' });
     if (precio !== undefined && !(Number(precio) >= 0 && precio !== '')) return res.status(400).json({ error: 'El precio no es válido' });
     if (activo !== undefined && typeof activo !== 'boolean') return res.status(400).json({ error: 'activo tiene que ser true o false' });
@@ -150,14 +163,28 @@ module.exports = function registrarRutasMercaderia(app) {
       if (!actual[0]) { await cliente.query('ROLLBACK'); return res.status(404).json({ error: 'Producto no encontrado' }); }
       const p = actual[0];
       const precioNuevo = precio !== undefined ? deCentavos(aCentavos(precio)) : p.precio;
+      let catNueva = p.categoria_id;
+      let ordenNuevo = p.orden;
+      if (categoria_id !== undefined) {
+        catNueva = categoria_id ? Number(categoria_id) : null;
+        if (catNueva && !(await cliente.query('SELECT 1 FROM merc_categorias WHERE id = $1', [catNueva])).rows[0]) {
+          await cliente.query('ROLLBACK');
+          return res.status(400).json({ error: 'La categoría no existe' });
+        }
+        if (catNueva !== p.categoria_id) {
+          // Cambia de categoría: queda al final de la nueva.
+          const { rows: [ord] } = await cliente.query('SELECT COALESCE(MAX(orden), -1) + 1 AS siguiente FROM merc_productos WHERE categoria_id IS NOT DISTINCT FROM $1', [catNueva]);
+          ordenNuevo = ord.siguiente;
+        }
+      }
       const { rows } = await cliente.query(
-        `UPDATE merc_productos SET nombre = $1, descripcion = $2, imagen_url = $3, precio = $4, activo = $5, actualizado_en = now()
-         WHERE id = $6 RETURNING id, nombre, descripcion, imagen_url, precio::float8 AS precio, activo`,
+        `UPDATE merc_productos SET nombre = $1, descripcion = $2, imagen_url = $3, precio = $4, activo = $5, categoria_id = $7, orden = $8, actualizado_en = now()
+         WHERE id = $6 RETURNING id, nombre, descripcion, imagen_url, precio::float8 AS precio, activo, categoria_id`,
         [
           nombre !== undefined ? String(nombre).trim() : p.nombre,
           descripcion !== undefined ? (descripcion?.trim() || null) : p.descripcion,
           imagen_url !== undefined ? (imagen_url || null) : p.imagen_url,
-          precioNuevo, activo !== undefined ? activo : p.activo, req.params.id,
+          precioNuevo, activo !== undefined ? activo : p.activo, req.params.id, catNueva, ordenNuevo,
         ]
       );
       if (aCentavos(precioNuevo) !== aCentavos(p.precio)) {
@@ -171,6 +198,109 @@ module.exports = function registrarRutasMercaderia(app) {
       }
       await cliente.query('COMMIT');
       res.json(rows[0]);
+    } catch (err) {
+      await cliente.query('ROLLBACK');
+      res.status(400).json({ error: err.message });
+    } finally {
+      cliente.release();
+    }
+  });
+
+  // Mueve una fila una posición dentro de su lista ordenada. Se renumera la
+  // lista completa (0..n-1) para que un orden repetido o con huecos no
+  // impida el intercambio.
+  async function moverEnLista(cliente, tabla, whereSql, params, id, direccion) {
+    const { rows } = await cliente.query(`SELECT id FROM ${tabla} ${whereSql} ORDER BY orden, id`, params);
+    const ids = rows.map((r) => r.id);
+    const i = ids.indexOf(Number(id));
+    if (i < 0) return false;
+    const j = direccion === 'arriba' ? i - 1 : i + 1;
+    if (j >= 0 && j < ids.length) {
+      [ids[i], ids[j]] = [ids[j], ids[i]];
+      for (let k = 0; k < ids.length; k++) await cliente.query(`UPDATE ${tabla} SET orden = $1 WHERE id = $2`, [k, ids[k]]);
+    }
+    return true;
+  }
+
+  app.get('/api/merc/categorias', requirePedir, async (req, res) => {
+    try {
+      const { rows } = await db.query('SELECT id, nombre, orden FROM merc_categorias ORDER BY orden, id');
+      res.json(rows);
+    } catch (err) {
+      res.status(500).json({ error: err.message });
+    }
+  });
+
+  app.post('/api/merc/categorias', requireMarca, async (req, res) => {
+    const nombre = req.body.nombre?.trim();
+    if (!nombre) return res.status(400).json({ error: 'Falta el nombre de la categoría' });
+    try {
+      const { rows } = await db.query(
+        'INSERT INTO merc_categorias (nombre, orden) VALUES ($1, (SELECT COALESCE(MAX(orden), -1) + 1 FROM merc_categorias)) RETURNING id, nombre, orden', [nombre]
+      );
+      await auditar(db, 'CATEGORIA_CREADA', 'categoria', rows[0].id, req.usuario.usuarioId, { nombre });
+      res.status(201).json(rows[0]);
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  app.patch('/api/merc/categorias/:id', requireMarca, async (req, res) => {
+    const nombre = req.body.nombre?.trim();
+    if (!nombre) return res.status(400).json({ error: 'Falta el nombre de la categoría' });
+    try {
+      const { rows } = await db.query('UPDATE merc_categorias SET nombre = $1 WHERE id = $2 RETURNING id, nombre, orden', [nombre, req.params.id]);
+      if (!rows[0]) return res.status(404).json({ error: 'Categoría no encontrada' });
+      await auditar(db, 'CATEGORIA_RENOMBRADA', 'categoria', rows[0].id, req.usuario.usuarioId, { nombre });
+      res.json(rows[0]);
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // Solo se elimina una categoría vacía (ningún producto, ni deshabilitado):
+  // los productos no se pierden ni quedan huérfanos.
+  app.delete('/api/merc/categorias/:id', requireMarca, async (req, res) => {
+    try {
+      const { rows: [uso] } = await db.query('SELECT COUNT(*)::int AS n FROM merc_productos WHERE categoria_id = $1', [req.params.id]);
+      if (uso.n > 0) return res.status(400).json({ error: 'La categoría todavía tiene productos - movelos a otra categoría antes de eliminarla' });
+      const { rows } = await db.query('DELETE FROM merc_categorias WHERE id = $1 RETURNING id, nombre', [req.params.id]);
+      if (!rows[0]) return res.status(404).json({ error: 'Categoría no encontrada' });
+      await auditar(db, 'CATEGORIA_ELIMINADA', 'categoria', rows[0].id, req.usuario.usuarioId, { nombre: rows[0].nombre });
+      res.json({ ok: true });
+    } catch (err) {
+      res.status(400).json({ error: err.message });
+    }
+  });
+
+  // Body: { direccion: 'arriba' | 'abajo' } (flechas del catálogo)
+  app.post('/api/merc/categorias/:id/mover', requireMarca, async (req, res) => {
+    if (!['arriba', 'abajo'].includes(req.body.direccion)) return res.status(400).json({ error: 'Dirección inválida' });
+    const cliente = await db.pool.connect();
+    try {
+      await cliente.query('BEGIN');
+      const ok = await moverEnLista(cliente, 'merc_categorias', '', [], req.params.id, req.body.direccion);
+      await cliente.query(ok ? 'COMMIT' : 'ROLLBACK');
+      res.status(ok ? 200 : 404).json(ok ? { ok: true } : { error: 'Categoría no encontrada' });
+    } catch (err) {
+      await cliente.query('ROLLBACK');
+      res.status(400).json({ error: err.message });
+    } finally {
+      cliente.release();
+    }
+  });
+
+  // Mueve un producto dentro de su categoría (entre los habilitados).
+  app.post('/api/merc/productos/:id/mover', requireMarca, async (req, res) => {
+    if (!['arriba', 'abajo'].includes(req.body.direccion)) return res.status(400).json({ error: 'Dirección inválida' });
+    const cliente = await db.pool.connect();
+    try {
+      await cliente.query('BEGIN');
+      const { rows: [p] } = await cliente.query('SELECT categoria_id FROM merc_productos WHERE id = $1', [req.params.id]);
+      if (!p) { await cliente.query('ROLLBACK'); return res.status(404).json({ error: 'Producto no encontrado' }); }
+      await moverEnLista(cliente, 'merc_productos', 'WHERE activo = true AND categoria_id IS NOT DISTINCT FROM $1', [p.categoria_id], req.params.id, req.body.direccion);
+      await cliente.query('COMMIT');
+      res.json({ ok: true });
     } catch (err) {
       await cliente.query('ROLLBACK');
       res.status(400).json({ error: err.message });
@@ -315,7 +445,12 @@ module.exports = function registrarRutasMercaderia(app) {
          FROM merc_pago_aplicaciones a JOIN merc_pagos pg ON pg.id = a.pago_id JOIN usuarios u ON u.id = pg.usuario_id
          WHERE a.pedido_id = $1 ORDER BY pg.creado_en, a.id`, [pedido.id]
       );
-      res.json({ ...pedido, numero: numeroPedido(pedido.id), items, movimientos, pagos });
+      const { rows: ediciones } = await db.query(
+        `SELECT e.id, e.creado_en, e.total_anterior::float8 AS total_anterior, e.total_nuevo::float8 AS total_nuevo, e.cambios,
+                ${db.nombreCompletoSql('u')} AS usuario_nombre
+         FROM merc_pedido_ediciones e JOIN usuarios u ON u.id = e.usuario_id WHERE e.pedido_id = $1 ORDER BY e.creado_en, e.id`, [pedido.id]
+      );
+      res.json({ ...pedido, numero: numeroPedido(pedido.id), items, movimientos, pagos, ediciones });
     } catch (err) {
       res.status(500).json({ error: err.message });
     }
@@ -329,9 +464,15 @@ module.exports = function registrarRutasMercaderia(app) {
     const cliente = await db.pool.connect();
     try {
       await cliente.query('BEGIN');
-      const { rows } = await cliente.query('SELECT id, estado FROM merc_pedidos WHERE id = $1 FOR UPDATE', [req.params.id]);
+      const { rows } = await cliente.query('SELECT id, estado, abonado, usuario_id FROM merc_pedidos WHERE id = $1 FOR UPDATE', [req.params.id]);
       if (!rows[0]) { await cliente.query('ROLLBACK'); return res.status(404).json({ error: 'Pedido no encontrado' }); }
       if (rows[0].estado === estado) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'El pedido ya está en ese estado' }); }
+      // Cancelar solo tiene sentido antes del retiro y sin cobros ya
+      // registrados (un pedido con pagos no se puede "desaparecer").
+      if (estado === 'CANCELADO') {
+        if (rows[0].estado === 'RETIRADO') { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'Un pedido ya retirado no se puede cancelar' }); }
+        if (aCentavos(rows[0].abonado) > 0) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'Este pedido ya tiene pagos registrados, no se puede cancelar' }); }
+      }
       // Los días de demora corren desde el momento en que pasa a RETIRADO.
       await cliente.query(
         `UPDATE merc_pedidos SET estado = $1, retirado_en = CASE WHEN $1 = 'RETIRADO' THEN now() ELSE NULL END WHERE id = $2`,
@@ -344,11 +485,120 @@ module.exports = function registrarRutasMercaderia(app) {
       await auditar(cliente, 'ESTADO_CAMBIADO', 'pedido', Number(req.params.id), req.usuario.usuarioId, { anterior: rows[0].estado, nuevo: estado });
       await cliente.query('COMMIT');
       res.json({ ok: true, estado });
+      // Que la marca cancele un pedido le llega al gerente que lo hizo.
+      if (estado === 'CANCELADO' && rows[0].usuario_id !== req.usuario.usuarioId) {
+        try {
+          await crearNotificacion(rows[0].usuario_id, 'PEDIDO_MERCADERIA', `Pedido ${numeroPedido(rows[0].id)} cancelado`,
+            'La marca canceló este pedido.', { pedido_id: rows[0].id, url: `/mercaderia/pedidos/${rows[0].id}` });
+        } catch (err) {
+          console.error('[mercaderia] no se pudo avisar la cancelación:', err.message);
+        }
+      }
     } catch (err) {
       await cliente.query('ROLLBACK');
       res.status(400).json({ error: err.message });
     } finally {
       cliente.release();
+    }
+  });
+
+  // Edición del contenido de un pedido por Personal de Marca, mientras no
+  // haya sido retirado (ni cancelado). Body: { items: [{ producto_id,
+  // cantidad, precio_unitario? }] } = cómo tiene que quedar el pedido
+  // completo. Se puede quitar mercadería, cambiar cantidades o el precio de
+  // una línea, y agregar otro producto. Recalcula el total (que no puede
+  // quedar por debajo de lo ya abonado), deja registrado qué cambió y avisa
+  // al gerente que hizo el pedido.
+  app.put('/api/merc/pedidos/:id/items', requireMarca, async (req, res) => {
+    if (!/^\d+$/.test(req.params.id)) return res.status(404).json({ error: 'Pedido no encontrado' });
+    const deseados = new Map();
+    for (const it of Array.isArray(req.body.items) ? req.body.items : []) {
+      const cantidad = Number(it.cantidad);
+      if (!Number.isInteger(cantidad) || cantidad < 1 || cantidad > 9999) return res.status(400).json({ error: 'Hay una cantidad inválida' });
+      if (it.precio_unitario !== undefined && it.precio_unitario !== null && !(Number(it.precio_unitario) >= 0)) return res.status(400).json({ error: 'Hay un precio inválido' });
+      if (deseados.has(Number(it.producto_id))) return res.status(400).json({ error: 'Un producto aparece repetido' });
+      deseados.set(Number(it.producto_id), { cantidad, precio: it.precio_unitario === undefined || it.precio_unitario === null ? null : aCentavos(it.precio_unitario) });
+    }
+    if (!deseados.size) return res.status(400).json({ error: 'El pedido no puede quedar vacío - si no se puede tomar, cancelalo' });
+
+    const cliente = await db.pool.connect();
+    let resultado;
+    try {
+      await cliente.query('BEGIN');
+      const { rows: [pedido] } = await cliente.query('SELECT id, estado, total, abonado, usuario_id FROM merc_pedidos WHERE id = $1 FOR UPDATE', [req.params.id]);
+      if (!pedido) { await cliente.query('ROLLBACK'); return res.status(404).json({ error: 'Pedido no encontrado' }); }
+      if (pedido.estado === 'RETIRADO') { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'El pedido ya fue retirado, no se puede editar' }); }
+      if (pedido.estado === 'CANCELADO') { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'El pedido está cancelado, no se puede editar' }); }
+
+      const { rows: actuales } = await cliente.query('SELECT id, producto_id, nombre, cantidad, precio_unitario FROM merc_pedido_items WHERE pedido_id = $1', [pedido.id]);
+      const actualPorProducto = new Map(actuales.map((a) => [a.producto_id, a]));
+      const cambios = [];
+      let totalNuevo = 0;
+      const altas = [];
+      const modificaciones = [];
+
+      for (const a of actuales) {
+        if (!deseados.has(a.producto_id)) cambios.push({ tipo: 'QUITADO', nombre: a.nombre, texto: `Quitado: ${a.nombre} (${a.cantidad})` });
+      }
+      for (const [productoId, d] of deseados) {
+        const actual = actualPorProducto.get(productoId);
+        if (actual) {
+          const precioC = d.precio ?? aCentavos(actual.precio_unitario);
+          totalNuevo += precioC * d.cantidad;
+          if (d.cantidad !== actual.cantidad) cambios.push({ tipo: 'CANTIDAD', nombre: actual.nombre, de: actual.cantidad, a: d.cantidad, texto: `${actual.nombre}: cantidad ${actual.cantidad} → ${d.cantidad}` });
+          if (precioC !== aCentavos(actual.precio_unitario)) cambios.push({ tipo: 'PRECIO', nombre: actual.nombre, de: Number(actual.precio_unitario), a: precioC / 100, texto: `${actual.nombre}: precio ${pesos(actual.precio_unitario)} → ${pesos(precioC / 100)}` });
+          if (d.cantidad !== actual.cantidad || precioC !== aCentavos(actual.precio_unitario)) modificaciones.push({ id: actual.id, cantidad: d.cantidad, precioC });
+        } else {
+          const { rows: [prod] } = await cliente.query('SELECT id, nombre, descripcion, imagen_url, precio FROM merc_productos WHERE id = $1 AND activo = true', [productoId]);
+          if (!prod) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'Algún producto agregado no existe o está deshabilitado' }); }
+          const precioC = d.precio ?? aCentavos(prod.precio);
+          totalNuevo += precioC * d.cantidad;
+          altas.push({ prod, cantidad: d.cantidad, precioC });
+          cambios.push({ tipo: 'AGREGADO', nombre: prod.nombre, cantidad: d.cantidad, precio: precioC / 100, texto: `Agregado: ${prod.nombre} (${d.cantidad} × ${pesos(precioC / 100)})` });
+        }
+      }
+      if (!cambios.length) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'No hay cambios para guardar' }); }
+      if (totalNuevo < aCentavos(pedido.abonado)) {
+        await cliente.query('ROLLBACK');
+        return res.status(400).json({ error: `El nuevo total (${pesos(totalNuevo / 100)}) no puede ser menor a lo ya abonado (${pesos(pedido.abonado)})` });
+      }
+
+      const quitar = actuales.filter((a) => !deseados.has(a.producto_id)).map((a) => a.id);
+      if (quitar.length) await cliente.query('DELETE FROM merc_pedido_items WHERE id = ANY($1)', [quitar]);
+      for (const m of modificaciones) await cliente.query('UPDATE merc_pedido_items SET cantidad = $1, precio_unitario = $2 WHERE id = $3', [m.cantidad, deCentavos(m.precioC), m.id]);
+      for (const a of altas) {
+        await cliente.query(
+          `INSERT INTO merc_pedido_items (pedido_id, producto_id, nombre, descripcion, imagen_url, precio_unitario, cantidad) VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+          [pedido.id, a.prod.id, a.prod.nombre, a.prod.descripcion, a.prod.imagen_url, deCentavos(a.precioC), a.cantidad]
+        );
+      }
+      await cliente.query('UPDATE merc_pedidos SET total = $1 WHERE id = $2', [deCentavos(totalNuevo), pedido.id]);
+      await cliente.query(
+        'INSERT INTO merc_pedido_ediciones (pedido_id, usuario_id, total_anterior, total_nuevo, cambios) VALUES ($1,$2,$3,$4,$5)',
+        [pedido.id, req.usuario.usuarioId, pedido.total, deCentavos(totalNuevo), JSON.stringify(cambios)]
+      );
+      await auditar(cliente, 'PEDIDO_EDITADO', 'pedido', pedido.id, req.usuario.usuarioId, { total_anterior: Number(pedido.total), total_nuevo: totalNuevo / 100, cambios: cambios.map((c) => c.texto) });
+      await cliente.query('COMMIT');
+      resultado = { pedido, cambios, totalNuevo: totalNuevo / 100 };
+    } catch (err) {
+      await cliente.query('ROLLBACK');
+      return res.status(400).json({ error: err.message });
+    } finally {
+      cliente.release();
+    }
+    res.json({ ok: true, total: resultado.totalNuevo, cambios: resultado.cambios.map((c) => c.texto) });
+
+    // Aviso al gerente que hizo el pedido, con el resumen de lo que cambió.
+    if (resultado.pedido.usuario_id !== req.usuario.usuarioId) {
+      try {
+        const resumen = resultado.cambios.map((c) => c.texto).join('; ');
+        await crearNotificacion(
+          resultado.pedido.usuario_id, 'PEDIDO_MERCADERIA', `Pedido ${numeroPedido(resultado.pedido.id)} editado`,
+          `${resumen}. Nuevo total: ${pesos(resultado.totalNuevo)}.`, { pedido_id: resultado.pedido.id, url: `/mercaderia/pedidos/${resultado.pedido.id}` }
+        );
+      } catch (err) {
+        console.error('[mercaderia] no se pudo avisar la edición:', err.message);
+      }
     }
   });
 
@@ -361,11 +611,11 @@ module.exports = function registrarRutasMercaderia(app) {
       const { rows: [tot] } = await db.query(
         `SELECT COALESCE(SUM(total - abonado), 0)::float8 AS total_pendiente, COUNT(*)::int AS pedidos_con_saldo,
                 COUNT(DISTINCT sucursal_id)::int AS sucursales_con_deuda
-         FROM merc_pedidos WHERE total > abonado`
+         FROM merc_pedidos WHERE total > abonado AND estado <> 'CANCELADO'`
       );
       const { rows: porSucursal } = await db.query(
         `SELECT p.sucursal_id, s.nombre AS sucursal_nombre, COUNT(*)::int AS pedidos, SUM(p.total - p.abonado)::float8 AS saldo
-         FROM merc_pedidos p JOIN sucursales s ON s.id = p.sucursal_id WHERE p.total > p.abonado
+         FROM merc_pedidos p JOIN sucursales s ON s.id = p.sucursal_id WHERE p.total > p.abonado AND p.estado <> 'CANCELADO'
          GROUP BY p.sucursal_id, s.nombre ORDER BY s.nombre`
       );
       res.json({ ...tot, por_sucursal: porSucursal });
@@ -389,10 +639,11 @@ module.exports = function registrarRutasMercaderia(app) {
     try {
       await cliente.query('BEGIN');
       const { rows: pedidos } = await cliente.query(
-        `SELECT id, total, abonado FROM merc_pedidos WHERE id = ANY($1) AND sucursal_id = $2 ORDER BY creado_en, id FOR UPDATE`,
+        `SELECT id, total, abonado, estado FROM merc_pedidos WHERE id = ANY($1) AND sucursal_id = $2 ORDER BY creado_en, id FOR UPDATE`,
         [ids, Number(sucursal_id)]
       );
       if (pedidos.length !== ids.length) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'Algún pedido no existe o no es de esa sucursal' }); }
+      if (pedidos.some((p) => p.estado === 'CANCELADO')) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'Un pedido cancelado no se puede cobrar' }); }
       const saldos = pedidos.map((p) => ({ id: p.id, saldo: aCentavos(p.total) - aCentavos(p.abonado) }));
       if (saldos.some((s) => s.saldo <= 0)) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'Algún pedido seleccionado ya no tiene saldo pendiente - actualizá la lista' }); }
       const saldoTotal = saldos.reduce((s, x) => s + x.saldo, 0);

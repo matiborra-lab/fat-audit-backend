@@ -21,7 +21,7 @@ const pesos = (n) => '$' + Number(n).toLocaleString('es-AR', { minimumFractionDi
 const numero = (id) => '#' + String(id).padStart(5, '0');
 const fecha = (d) => new Date(d).toLocaleDateString('es-AR', { timeZone: ZONA });
 const fechaISO = (s) => s.split('-').reverse().join('/');
-const ETIQUETA_ESTADO = { PENDIENTE_CONFIRMAR: 'Pendiente de confirmar', CONFIRMADO: 'Confirmado', LISTO_RETIRAR: 'Listo para retirar', RETIRADO: 'Retirado' };
+const ETIQUETA_ESTADO = { PENDIENTE_CONFIRMAR: 'Pendiente de confirmar', CONFIRMADO: 'Confirmado', LISTO_RETIRAR: 'Listo para retirar', RETIRADO: 'Retirado', CANCELADO: 'Cancelado' };
 
 function demora(p) {
   if (p.dias_demora == null) return 'aún no retirado';
@@ -147,7 +147,8 @@ async function generarPdfDocumentos({ pedidos, desde, hasta, todasLasSucursales 
         total: pesos(p.total), abonado: pesos(p.abonado), saldo: pesos(p.saldo),
       });
       doc.y += 13;
-      sub.total += Math.round(p.total * 100); sub.abonado += Math.round(p.abonado * 100); sub.saldo += Math.round(p.saldo * 100);
+      // Un pedido cancelado se lista pero no suma en los totales.
+      if (p.estado !== 'CANCELADO') { sub.total += Math.round(p.total * 100); sub.abonado += Math.round(p.abonado * 100); sub.saldo += Math.round(p.saldo * 100); }
     }
     for (const k of Object.keys(sub)) acumulado[k] += sub[k];
     espacio(doc, 26);
