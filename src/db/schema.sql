@@ -56,6 +56,9 @@ CREATE TABLE usuarios (
   ultimo_login      TIMESTAMPTZ,
   ultima_actividad_en TIMESTAMPTZ,           -- cualquier request autenticado (no solo login) - ver requireAuth,
                                               -- se actualiza con throttle para no escribir en cada pedido
+  personal_marca BOOLEAN NOT NULL DEFAULT false,
+                                          -- solo lo cambia un Admin (ver Usuarios): habilita Mercaderia FAT completa
+                                          -- (ver todos los pedidos, estados, cobros, catalogo, reportes, push de nuevos pedidos)
   tutorial_completado_en TIMESTAMPTZ,        -- NULL = todavia no vio/omitio el tutorial guiado del Centro de
                                               -- ayuda - se muestra la bienvenida una sola vez, ver Onboarding.jsx
   creado_en         TIMESTAMPTZ NOT NULL DEFAULT now()
@@ -437,7 +440,8 @@ CREATE TABLE notificacion_preferencias (
                         'ASIGNACION_TAREA', 'RECORDATORIO_TAREA',
                         'ASIGNACION_AUDITORIA', 'RECORDATORIO_AUDITORIA',
                         'ASIGNACION_EVENTO_ESPECIAL', 'RECORDATORIO_EVENTO_ESPECIAL',
-                        'TURNOS_ASIGNADOS', 'CUMPLEANOS', 'CLIMA'
+                        'TURNOS_ASIGNADOS', 'CUMPLEANOS', 'CLIMA',
+                        'NUEVOS_PEDIDOS_MERCADERIA'
                       )),
   habilitado          BOOLEAN NOT NULL DEFAULT true,
   anticipacion_horas  INTEGER,
@@ -531,3 +535,94 @@ CREATE TABLE comunicados (
   creado_en         TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_comunicados_pendientes ON comunicados (fecha_envio) WHERE enviado_en IS NULL;
+
+-- ============================================================
+-- MERCADERIA FAT - pedidos de mercadería de las sucursales a la marca
+-- ============================================================
+-- Tres conceptos separados: estado operativo (merc_pedidos.estado), estado
+-- financiero (derivado: saldo = total - abonado, ver merc_pagos) y el saldo
+-- en sí. Nada se borra: los productos se deshabilitan (activo=false) y cada
+-- pedido guarda una copia de nombre/descripcion/imagen/precio de cada
+-- producto al momento de confirmarse (merc_pedido_items), así un cambio
+-- posterior del catálogo no altera pedidos ya hechos.
+
+CREATE TABLE merc_productos (
+  id             SERIAL PRIMARY KEY,
+  nombre         TEXT NOT NULL,
+  descripcion    TEXT,
+  imagen_url     TEXT,
+  precio         NUMERIC(14,2) NOT NULL CHECK (precio >= 0),
+  activo         BOOLEAN NOT NULL DEFAULT true,     -- false = "deshabilitado": no se ofrece en pedidos nuevos, nunca se borra
+  creado_por     INTEGER REFERENCES usuarios(id),
+  creado_en      TIMESTAMPTZ NOT NULL DEFAULT now(),
+  actualizado_en TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE merc_pedidos (
+  id          SERIAL PRIMARY KEY,                    -- el número de pedido (se muestra como #00128)
+  sucursal_id INTEGER NOT NULL REFERENCES sucursales(id),
+  usuario_id  INTEGER NOT NULL REFERENCES usuarios(id),   -- quien lo hizo
+  estado      TEXT NOT NULL DEFAULT 'PENDIENTE_CONFIRMAR'
+              CHECK (estado IN ('PENDIENTE_CONFIRMAR', 'CONFIRMADO', 'LISTO_RETIRAR', 'RETIRADO')),
+  total       NUMERIC(14,2) NOT NULL CHECK (total >= 0),
+  abonado     NUMERIC(14,2) NOT NULL DEFAULT 0 CHECK (abonado >= 0 AND abonado <= total),
+                                                     -- saldo pendiente = total - abonado; se actualiza SOLO al registrar un pago
+  retirado_en TIMESTAMPTZ,                           -- desde acá corren los "días de demora" (NULL si no está en RETIRADO)
+  creado_en   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_merc_pedidos_sucursal ON merc_pedidos (sucursal_id, creado_en);
+CREATE INDEX idx_merc_pedidos_saldo ON merc_pedidos (sucursal_id, creado_en) WHERE total > abonado;
+
+CREATE TABLE merc_pedido_items (
+  id              SERIAL PRIMARY KEY,
+  pedido_id       INTEGER NOT NULL REFERENCES merc_pedidos(id),
+  producto_id     INTEGER NOT NULL REFERENCES merc_productos(id),
+  nombre          TEXT NOT NULL,                     -- copia al momento del pedido
+  descripcion     TEXT,
+  imagen_url      TEXT,
+  precio_unitario NUMERIC(14,2) NOT NULL,            -- precio histórico: no cambia si el catálogo cambia
+  cantidad        INTEGER NOT NULL CHECK (cantidad > 0)
+);
+CREATE INDEX idx_merc_items_pedido ON merc_pedido_items (pedido_id);
+
+CREATE TABLE merc_pedido_movimientos (
+  id              SERIAL PRIMARY KEY,
+  pedido_id       INTEGER NOT NULL REFERENCES merc_pedidos(id),
+  estado_anterior TEXT,                              -- NULL en el alta del pedido
+  estado_nuevo    TEXT NOT NULL,
+  usuario_id      INTEGER NOT NULL REFERENCES usuarios(id),
+  creado_en       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_merc_mov_pedido ON merc_pedido_movimientos (pedido_id, creado_en);
+
+CREATE TABLE merc_pagos (
+  id            SERIAL PRIMARY KEY,
+  sucursal_id   INTEGER NOT NULL REFERENCES sucursales(id),
+  monto         NUMERIC(14,2) NOT NULL CHECK (monto > 0),
+  observaciones TEXT,
+  usuario_id    INTEGER NOT NULL REFERENCES usuarios(id),   -- quien registró el cobro
+  creado_en     TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+-- Cómo se repartió cada pago entre pedidos (más antiguo primero: el saldo
+-- remanente queda solo en el último pedido alcanzado).
+CREATE TABLE merc_pago_aplicaciones (
+  id             SERIAL PRIMARY KEY,
+  pago_id        INTEGER NOT NULL REFERENCES merc_pagos(id),
+  pedido_id      INTEGER NOT NULL REFERENCES merc_pedidos(id),
+  saldo_anterior NUMERIC(14,2) NOT NULL,
+  importe        NUMERIC(14,2) NOT NULL CHECK (importe > 0)
+);
+CREATE INDEX idx_merc_aplic_pedido ON merc_pago_aplicaciones (pedido_id);
+
+-- Trazabilidad de acciones relevantes (pedido creado, cambio de estado,
+-- cobro, cambio de precio, producto habilitado/deshabilitado...).
+CREATE TABLE merc_auditoria (
+  id         SERIAL PRIMARY KEY,
+  accion     TEXT NOT NULL,
+  entidad    TEXT NOT NULL,
+  entidad_id INTEGER,
+  usuario_id INTEGER REFERENCES usuarios(id),
+  detalle    JSONB,
+  creado_en  TIMESTAMPTZ NOT NULL DEFAULT now()
+);

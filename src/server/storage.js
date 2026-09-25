@@ -12,7 +12,7 @@ const express = require('express');
 const { requireAdmin } = require('../auth/middleware');
 const { subirDesdeServidor, diagnosticar } = require('../storage');
 
-const CARPETAS = ['auditorias', 'tareas', 'comunicados'];
+const CARPETAS = ['auditorias', 'tareas', 'comunicados', 'mercaderia'];
 const LIMITE_MB = 30;
 
 module.exports = function registrarRutasStorage(app) {
@@ -22,6 +22,7 @@ module.exports = function registrarRutasStorage(app) {
     if (!CARPETAS.includes(carpeta)) return res.status(400).json({ error: 'Carpeta inválida' });
     // Mismo criterio que /api/comunicados/imagen/url-subida: solo Admin.
     if (carpeta === 'comunicados' && req.usuario.rol !== 'ADMIN') return res.status(403).json({ error: 'Solo un administrador puede subir imágenes de comunicados' });
+    if (carpeta === 'mercaderia' && req.usuario.personal_marca !== true) return res.status(403).json({ error: 'Solo Personal de Marca puede subir imágenes del catálogo' });
     if (!Buffer.isBuffer(req.body) || !req.body.length) return res.status(400).json({ error: 'Falta el archivo (o es de un tipo no soportado)' });
     try {
       const resultado = await subirDesdeServidor({

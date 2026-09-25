@@ -95,7 +95,7 @@ app.post('/api/auth/login', async (req, res) => {
   try {
     const valor = String(identificador).toLowerCase().trim();
     const { rows } = await db.query(
-      "SELECT id, email, TRIM(nombre || ' ' || COALESCE(apellido, '')) AS nombre, password_hash, rol, sucursal_id, activo, tutorial_completado_en FROM usuarios WHERE email = $1 OR LOWER(usuario) = $1",
+      "SELECT id, email, TRIM(nombre || ' ' || COALESCE(apellido, '')) AS nombre, password_hash, rol, sucursal_id, activo, personal_marca, tutorial_completado_en FROM usuarios WHERE email = $1 OR LOWER(usuario) = $1",
       [valor]
     );
     const usuario = rows[0];
@@ -108,7 +108,7 @@ app.post('/api/auth/login', async (req, res) => {
       token,
       usuario: {
         id: usuario.id, email: usuario.email, nombre: usuario.nombre, rol: usuario.rol, sucursal_id: usuario.sucursal_id,
-        tutorial_completado_en: usuario.tutorial_completado_en,
+        personal_marca: usuario.personal_marca === true, tutorial_completado_en: usuario.tutorial_completado_en,
       },
     });
   } catch (err) {
@@ -171,7 +171,7 @@ app.use(requireAuth);
 app.get('/api/auth/yo', (req, res) => {
   res.json({
     id: req.usuario.usuarioId, email: req.usuario.email, nombre: req.usuario.nombre,
-    rol: req.usuario.rol, sucursal_id: req.usuario.sucursal_id,
+    rol: req.usuario.rol, sucursal_id: req.usuario.sucursal_id, personal_marca: req.usuario.personal_marca,
     tutorial_completado_en: req.usuario.tutorial_completado_en,
   });
 });
@@ -419,7 +419,7 @@ app.get('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
     // to_char en fecha_nacimiento - una columna DATE cruda serializa como
     // timestamp completo via pg/JSON, y el frontend la usa tal cual en un
     // <input type="date"> (mismo ajuste que GET /api/feriados).
-    let sql = `SELECT u.id, u.email, u.usuario, u.nombre, u.apellido, u.rol, u.sucursal_id, s.nombre AS sucursal_nombre, u.puesto,
+    let sql = `SELECT u.id, u.email, u.usuario, u.nombre, u.apellido, u.rol, u.sucursal_id, s.nombre AS sucursal_nombre, u.puesto, u.personal_marca,
               to_char(u.fecha_nacimiento, 'YYYY-MM-DD') AS fecha_nacimiento,
               u.activo, u.eliminado_en, u.ultimo_login, u.ultima_actividad_en, u.creado_en, (u.password_hash IS NOT NULL) AS clave_definida
        FROM usuarios u LEFT JOIN sucursales s ON s.id = u.sucursal_id WHERE 1=1`;
@@ -442,7 +442,7 @@ app.get('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
 });
 
 app.post('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
-  let { email, usuario: nombreUsuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento } = req.body;
+  let { email, usuario: nombreUsuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento, personal_marca } = req.body;
   if (!email || !EMAIL_REGEX.test(email)) return res.status(400).json({ error: 'El email no es valido' });
   if (nombreUsuario && !USUARIO_REGEX.test(nombreUsuario)) return res.status(400).json({ error: 'El nombre de usuario tiene que tener 3-30 caracteres (letras, numeros, puntos, guiones)' });
 
@@ -459,9 +459,11 @@ app.post('/api/admin/usuarios', requireAdminOGerente, async (req, res) => {
 
   try {
     const { rows } = await db.query(
-      `INSERT INTO usuarios (email, usuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
-       RETURNING id, email, usuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento, activo, creado_en`,
-      [String(email).toLowerCase().trim(), nombreUsuario ? nombreUsuario.trim() : null, nombre || null, apellido || null, rol, (rol === 'GERENTE' || rol === 'COLABORADOR') ? sucursal_id : null, rol === 'COLABORADOR' ? puesto : null, fecha_nacimiento || null]
+      `INSERT INTO usuarios (email, usuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento, personal_marca) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+       RETURNING id, email, usuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento, personal_marca, activo, creado_en`,
+      [String(email).toLowerCase().trim(), nombreUsuario ? nombreUsuario.trim() : null, nombre || null, apellido || null, rol, (rol === 'GERENTE' || rol === 'COLABORADOR') ? sucursal_id : null, rol === 'COLABORADOR' ? puesto : null, fecha_nacimiento || null,
+        // Solo un Admin puede dar el permiso de Personal de Marca (un Gerente que invita ignora el campo).
+        req.usuario.rol === 'ADMIN' && personal_marca === true]
     );
     const usuario = rows[0];
     try {
@@ -499,6 +501,9 @@ app.patch('/api/admin/usuarios/:id', requireAdminOGerente, async (req, res) => {
       if (req.body.rol !== undefined || req.body.sucursal_id !== undefined) {
         return res.status(403).json({ error: 'Un gerente no puede cambiar el rol ni la sucursal de un colaborador' });
       }
+      if (req.body.personal_marca !== undefined) {
+        return res.status(403).json({ error: 'Solo un administrador puede asignar Personal de Marca' });
+      }
       if (req.body.activo !== undefined) {
         return res.status(403).json({ error: 'Solo un administrador puede eliminar o reactivar usuarios' });
       }
@@ -518,7 +523,8 @@ app.patch('/api/admin/usuarios/:id', requireAdminOGerente, async (req, res) => {
       return res.json(rows[0]);
     }
 
-    const { rol, sucursal_id, activo, nombre, apellido, puesto, usuario: nombreUsuario, fecha_nacimiento, email } = req.body;
+    const { rol, sucursal_id, activo, nombre, apellido, puesto, usuario: nombreUsuario, fecha_nacimiento, email, personal_marca } = req.body;
+    if (personal_marca !== undefined && typeof personal_marca !== 'boolean') return res.status(400).json({ error: 'personal_marca tiene que ser true o false' });
     if (rol !== undefined && !ROLES_VALIDOS.includes(rol)) return res.status(400).json({ error: 'Rol invalido' });
     if (rol === 'GERENTE' && sucursal_id === undefined) return res.status(400).json({ error: 'Un gerente necesita una sucursal asignada' });
     if (rol === 'COLABORADOR' && sucursal_id === undefined) return res.status(400).json({ error: 'Un colaborador necesita una sucursal asignada' });
@@ -530,9 +536,9 @@ app.patch('/api/admin/usuarios/:id', requireAdminOGerente, async (req, res) => {
        sucursal_id = CASE WHEN $1 IN ('GERENTE','COLABORADOR') THEN $3 WHEN $1 IS NOT NULL THEN NULL ELSE sucursal_id END,
        puesto = CASE WHEN $1 = 'COLABORADOR' THEN COALESCE($6,puesto) WHEN $1 IS NOT NULL THEN NULL ELSE puesto END,
        activo = COALESCE($4,activo), usuario = COALESCE($7,usuario), fecha_nacimiento = COALESCE($8,fecha_nacimiento),
-       email = COALESCE($9,email)
-       WHERE id = $5 RETURNING id, email, usuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento, activo`,
-      [rol ?? null, nombre ?? null, sucursal_id ?? null, activo ?? null, req.params.id, puesto ?? null, nombreUsuario ? nombreUsuario.trim() : null, fecha_nacimiento ?? null, email ? String(email).toLowerCase().trim() : null, apellido ?? null]
+       email = COALESCE($9,email), personal_marca = COALESCE($11,personal_marca)
+       WHERE id = $5 RETURNING id, email, usuario, nombre, apellido, rol, sucursal_id, puesto, fecha_nacimiento, personal_marca, activo`,
+      [rol ?? null, nombre ?? null, sucursal_id ?? null, activo ?? null, req.params.id, puesto ?? null, nombreUsuario ? nombreUsuario.trim() : null, fecha_nacimiento ?? null, email ? String(email).toLowerCase().trim() : null, apellido ?? null, personal_marca ?? null]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Usuario no encontrado' });
     res.json(rows[0]);
@@ -627,7 +633,9 @@ const tareas = require('./tareas');
 const licencias = require('./licencias');
 const comunicados = require('./comunicados');
 const storage = require('./storage');
+const mercaderia = require('./mercaderia');
 storage(app);
+mercaderia(app);
 plantillas(app);
 runs(app);
 historial(app);
