@@ -6,7 +6,9 @@
  *  1) estado operativo del pedido (merc_pedidos.estado) - solo lo cambia
  *     Personal de Marca, y cada cambio queda en merc_pedido_movimientos;
  *  2) estado financiero - derivado del saldo (PENDIENTE_COBRO si total >
- *     abonado, ABONADO si no);
+ *     abonado, ABONADO si no). Una sucursal solo tiene deuda desde que el
+ *     pedido está RETIRADO: antes (o si se cancela) el saldo pendiente es 0,
+ *     el pedido no se puede cobrar y no entra en los totales de deuda;
  *  3) el saldo (total - abonado) - se mueve UNICAMENTE al registrar un pago
  *     (POST /api/merc/pagos); no existe ninguna acción "marcar como pagado".
  *
@@ -57,10 +59,10 @@ const SELECT_PEDIDO = `
   SELECT p.id, p.sucursal_id, s.nombre AS sucursal_nombre, p.usuario_id,
          ${db.nombreCompletoSql('u')} AS responsable_nombre,
          p.creado_en, p.total::float8 AS total, p.abonado::float8 AS abonado,
-         -- un pedido cancelado no genera deuda: su saldo es siempre 0
-         (CASE WHEN p.estado = 'CANCELADO' THEN 0 ELSE p.total - p.abonado END)::float8 AS saldo,
+         -- la deuda existe SOLO desde que el pedido fue retirado: antes (o si se canceló) el saldo pendiente es 0
+         (CASE WHEN p.estado = 'RETIRADO' THEN p.total - p.abonado ELSE 0 END)::float8 AS saldo,
          p.estado,
-         CASE WHEN p.estado = 'CANCELADO' THEN 'NO_APLICA' WHEN p.total > p.abonado THEN 'PENDIENTE_COBRO' ELSE 'ABONADO' END AS estado_cobro,
+         CASE WHEN p.estado <> 'RETIRADO' THEN 'NO_APLICA' WHEN p.total > p.abonado THEN 'PENDIENTE_COBRO' ELSE 'ABONADO' END AS estado_cobro,
          EXISTS (SELECT 1 FROM merc_pedido_ediciones e WHERE e.pedido_id = p.id) AS editado,
          p.retirado_en,
          CASE WHEN p.retirado_en IS NOT NULL THEN (now()::date - p.retirado_en::date) END AS dias_demora
@@ -78,9 +80,9 @@ function armarFiltros(usuario, q) {
   if (!esMarca(usuario)) agregar('p.sucursal_id = ?', usuario.sucursal_id);
   else if (q.sucursal_id) agregar('p.sucursal_id = ?', Number(q.sucursal_id));
   if (q.estado) agregar('p.estado = ?', q.estado);
-  if (q.cobro === 'PENDIENTE_COBRO') cond.push("p.estado <> 'CANCELADO' AND p.total > p.abonado");
-  if (q.cobro === 'ABONADO') cond.push("p.estado <> 'CANCELADO' AND p.total <= p.abonado");
-  if (q.con_saldo === '1') cond.push("p.estado <> 'CANCELADO' AND p.total > p.abonado");
+  if (q.cobro === 'PENDIENTE_COBRO') cond.push("p.estado = 'RETIRADO' AND p.total > p.abonado");
+  if (q.cobro === 'ABONADO') cond.push("p.estado = 'RETIRADO' AND p.total <= p.abonado");
+  if (q.con_saldo === '1') cond.push("p.estado = 'RETIRADO' AND p.total > p.abonado");
   if (q.usuario_id) agregar('p.usuario_id = ?', Number(q.usuario_id));
   if (q.desde) agregar('p.creado_en >= ?::date', q.desde);
   if (q.hasta) agregar("p.creado_en < (?::date + 1)", q.hasta);
@@ -611,11 +613,11 @@ module.exports = function registrarRutasMercaderia(app) {
       const { rows: [tot] } = await db.query(
         `SELECT COALESCE(SUM(total - abonado), 0)::float8 AS total_pendiente, COUNT(*)::int AS pedidos_con_saldo,
                 COUNT(DISTINCT sucursal_id)::int AS sucursales_con_deuda
-         FROM merc_pedidos WHERE total > abonado AND estado <> 'CANCELADO'`
+         FROM merc_pedidos WHERE total > abonado AND estado = 'RETIRADO'`
       );
       const { rows: porSucursal } = await db.query(
         `SELECT p.sucursal_id, s.nombre AS sucursal_nombre, COUNT(*)::int AS pedidos, SUM(p.total - p.abonado)::float8 AS saldo
-         FROM merc_pedidos p JOIN sucursales s ON s.id = p.sucursal_id WHERE p.total > p.abonado AND p.estado <> 'CANCELADO'
+         FROM merc_pedidos p JOIN sucursales s ON s.id = p.sucursal_id WHERE p.total > p.abonado AND p.estado = 'RETIRADO'
          GROUP BY p.sucursal_id, s.nombre ORDER BY s.nombre`
       );
       res.json({ ...tot, por_sucursal: porSucursal });
@@ -643,7 +645,7 @@ module.exports = function registrarRutasMercaderia(app) {
         [ids, Number(sucursal_id)]
       );
       if (pedidos.length !== ids.length) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'Algún pedido no existe o no es de esa sucursal' }); }
-      if (pedidos.some((p) => p.estado === 'CANCELADO')) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'Un pedido cancelado no se puede cobrar' }); }
+      if (pedidos.some((p) => p.estado !== 'RETIRADO')) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'Solo se pueden cobrar pedidos ya retirados (la deuda se genera con el retiro)' }); }
       const saldos = pedidos.map((p) => ({ id: p.id, saldo: aCentavos(p.total) - aCentavos(p.abonado) }));
       if (saldos.some((s) => s.saldo <= 0)) { await cliente.query('ROLLBACK'); return res.status(400).json({ error: 'Algún pedido seleccionado ya no tiene saldo pendiente - actualizá la lista' }); }
       const saldoTotal = saldos.reduce((s, x) => s + x.saldo, 0);
