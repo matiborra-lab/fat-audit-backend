@@ -27,8 +27,12 @@ function armarPrompt({ criterio, itemTexto }) {
 
 (Ítem de la auditoría: "${itemTexto}")
 
-Evaluá ÚNICAMENTE lo que se ve en la imagen, con criterio estricto pero razonable. Respondé EXCLUSIVAMENTE con un JSON válido, sin texto antes ni después, con este formato exacto:
-{"cumplido": true o false, "razon": "una frase corta (máx. 20 palabras) explicando qué se ve en la foto"}`;
+Analizá la imagen en dos pasos:
+1. Primero fijate si la foto realmente muestra lo que hace falta para juzgar esta tarea (el equipo, mueble o zona correspondiente - puede tener formatos distintos según la sucursal, pero tiene que ser reconocible como eso). Si la foto muestra otra cosa (una pared, el piso, una persona, otro sector, una foto borrosa o negra, etc.) o no se puede identificar el objeto/zona en cuestión, NO está cumplido - decilo explícitamente en la razón (ej. "La foto no muestra la freidora: se ve una pared").
+2. Solo si la foto SÍ muestra lo correspondiente, evaluá con criterio estricto pero razonable si cumple lo pedido.
+
+Respondé EXCLUSIVAMENTE con un JSON válido, sin texto antes ni después, con este formato exacto:
+{"cumplido": true o false, "razon": "una frase corta (máx. 20 palabras): si la foto no corresponde, decilo; si corresponde, describí qué se ve y por qué cumple o no"}`;
 }
 
 // Devuelve { aprobado, razon }. Tira ErrorConfiguracionIA si falta la API
