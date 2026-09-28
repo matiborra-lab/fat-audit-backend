@@ -97,8 +97,8 @@ async function copiarEstructura(client, origen, nueva) {
   estructura.areas.forEach((a, i) => { areaIds[a.id] = areaRows[i].id; });
 
   const itemRows = await db.bulkInsert(client, 'audit_items',
-    ['sector_id', 'area_id', 'texto', 'ayuda_texto', 'tipo_respuesta', 'opciones_json', 'peso', 'critico', 'informe_in_situ', 'evidencia_requerida', 'permite_no_aplica', 'orden'],
-    estructura.items.map((it) => [sectorIds[it.sector_id], areaIds[it.area_id], it.texto, it.ayuda_texto, it.tipo_respuesta, it.opciones_json, it.peso, it.critico, it.informe_in_situ, it.evidencia_requerida, it.permite_no_aplica, it.orden]));
+    ['sector_id', 'area_id', 'texto', 'ayuda_texto', 'tipo_respuesta', 'opciones_json', 'peso', 'critico', 'informe_in_situ', 'evidencia_requerida', 'permite_no_aplica', 'orden', 'verificacion_ia', 'criterio_ia'],
+    estructura.items.map((it) => [sectorIds[it.sector_id], areaIds[it.area_id], it.texto, it.ayuda_texto, it.tipo_respuesta, it.opciones_json, it.peso, it.critico, it.informe_in_situ, it.evidencia_requerida, it.permite_no_aplica, it.orden, it.verificacion_ia, it.criterio_ia]));
   const itemIds = itemRows.map((r) => r.id);
   const reglasFilas = estructura.items.flatMap((it, i) => (it.reglas || []).map((regla) => [itemIds[i], regla.condicion_json, regla.acciones_json]));
   await db.bulkInsert(client, 'item_reglas', ['item_id', 'condicion_json', 'acciones_json'], reglasFilas);
@@ -255,9 +255,20 @@ function registrarRutasPlantillas(app) {
         if (!sectorIds[it.sector] || !areaIds[it.area]) {
           throw Object.assign(new Error(`Ítem "${it.texto}": el sector o área indicado no existe en esta plantilla`), { status: 400 });
         }
+        // La IA solo tiene algo para mirar si el ítem efectivamente pide una
+        // foto, y solo tiene sentido activarla si se aclara qué debe verse
+        // cumplido - si no, cada auditor terminaría a criterio del modelo.
+        if (it.verificacion_ia) {
+          if (!['FOTO', 'FOTO_O_VIDEO'].includes(it.evidencia_requerida)) {
+            throw Object.assign(new Error(`Ítem "${it.texto}": la verificación por IA requiere evidencia de tipo FOTO o FOTO_O_VIDEO`), { status: 400 });
+          }
+          if (!it.criterio_ia || !it.criterio_ia.trim()) {
+            throw Object.assign(new Error(`Ítem "${it.texto}": describí qué debe verse cumplido en la foto para poder verificarlo con IA`), { status: 400 });
+          }
+        }
       }
       const itemRows = await db.bulkInsert(client, 'audit_items',
-        ['sector_id', 'area_id', 'texto', 'ayuda_texto', 'tipo_respuesta', 'opciones_json', 'peso', 'critico', 'informe_in_situ', 'evidencia_requerida', 'permite_no_aplica', 'orden'],
+        ['sector_id', 'area_id', 'texto', 'ayuda_texto', 'tipo_respuesta', 'opciones_json', 'peso', 'critico', 'informe_in_situ', 'evidencia_requerida', 'permite_no_aplica', 'orden', 'verificacion_ia', 'criterio_ia'],
         items.map((it, i) => {
           const tipo = it.tipo_respuesta || 'ESCALA_5';
           return [
@@ -265,6 +276,7 @@ function registrarRutasPlantillas(app) {
             it.opciones_json ? JSON.stringify(it.opciones_json) : null,
             TIPOS_PUNTUABLES.includes(tipo) ? (it.peso ?? null) : null, // TEXTO/FECHA/NUMERO nunca guardan peso
             !!it.critico, !!it.informe_in_situ, it.evidencia_requerida || 'NINGUNA', !!it.permite_no_aplica, it.orden ?? i,
+            !!it.verificacion_ia, it.verificacion_ia ? it.criterio_ia.trim() : null,
           ];
         }));
       const itemIds = itemRows.map((r) => r.id);

@@ -157,7 +157,9 @@ CREATE TABLE audit_items (
   informe_in_situ      BOOLEAN NOT NULL DEFAULT false,   -- debe figurar en el comprobante de visita
   evidencia_requerida  TEXT NOT NULL DEFAULT 'NINGUNA' CHECK (evidencia_requerida IN ('NINGUNA', 'FOTO', 'VIDEO', 'FOTO_O_VIDEO')),
   permite_no_aplica    BOOLEAN NOT NULL DEFAULT false,
-  orden                INTEGER NOT NULL DEFAULT 0
+  orden                INTEGER NOT NULL DEFAULT 0,
+  verificacion_ia      BOOLEAN NOT NULL DEFAULT false,   -- exige que la foto pase análisis por IA antes de aceptarse (solo tiene sentido con evidencia_requerida FOTO/FOTO_O_VIDEO)
+  criterio_ia          TEXT                              -- qué debe verse cumplido en la foto (prompt que se le manda a la IA), ej. "La freidora debe estar limpia, sin restos de aceite ni comida"
 );
 CREATE INDEX idx_audit_items_sector ON audit_items (sector_id);
 CREATE INDEX idx_audit_items_area ON audit_items (area_id);
@@ -236,6 +238,23 @@ CREATE TABLE evidencias (
   creado_en      TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_evidencias_respuesta ON evidencias (respuesta_id);
+
+-- Registro de cada intento de verificación por IA de un ítem con
+-- verificacion_ia (ver src/ia/verificacionFoto.js) - una fila por foto
+-- analizada, no solo la última: permite contar intentos y saber en el
+-- resumen final qué ítems quedaron sin aprobar (forzado = true, el auditor
+-- decidió continuar sin que la IA diera el visto bueno). item_id apunta al
+-- id DENTRO del snapshot, igual que audit_respuestas.item_id.
+CREATE TABLE verificaciones_ia (
+  id         SERIAL PRIMARY KEY,
+  run_id     INTEGER NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+  item_id    INTEGER NOT NULL,
+  aprobado   BOOLEAN NOT NULL,
+  razon      TEXT,
+  forzado    BOOLEAN NOT NULL DEFAULT false,
+  creado_en  TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_verificaciones_ia_run ON verificaciones_ia (run_id);
 
 -- Semaforo editable (hoy seedeado con los 5 tramos de la spec) - preparado
 -- para que una futura pantalla de Configuracion lo edite sin tocar el schema.
@@ -441,7 +460,7 @@ CREATE TABLE notificacion_preferencias (
                         'ASIGNACION_AUDITORIA', 'RECORDATORIO_AUDITORIA',
                         'ASIGNACION_EVENTO_ESPECIAL', 'RECORDATORIO_EVENTO_ESPECIAL',
                         'TURNOS_ASIGNADOS', 'CUMPLEANOS', 'CLIMA',
-                        'NUEVOS_PEDIDOS_MERCADERIA'
+                        'NUEVOS_PEDIDOS_MERCADERIA', 'AUDITORIA_ITEMS_NO_VERIFICADOS'
                       )),
   habilitado          BOOLEAN NOT NULL DEFAULT true,
   anticipacion_horas  INTEGER,
