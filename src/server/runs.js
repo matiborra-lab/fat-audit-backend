@@ -231,9 +231,67 @@ module.exports = function registrarRutasRuns(app) {
       const { rows: evidencias } = respuestaIds.length
         ? await db.query('SELECT * FROM evidencias WHERE respuesta_id = ANY($1) ORDER BY creado_en', [respuestaIds])
         : { rows: [] };
-      res.json({ ...run, respuestas, evidencias });
+      // Verificaciones por IA (para mostrar el veredicto en el detalle, ver
+      // HistorialDetalle.jsx) y revisiones manuales posteriores (quién y
+      // cuándo corrigió un ítem, ver PUT .../revision más abajo).
+      const { rows: verificacionesIa } = await db.query('SELECT * FROM verificaciones_ia WHERE run_id = $1 ORDER BY id', [req.params.id]);
+      const { rows: revisiones } = await db.query(
+        `SELECT r.*, ${db.nombreCompletoSql('u')} AS usuario_nombre FROM audit_respuesta_revisiones r JOIN usuarios u ON u.id = r.usuario_id WHERE r.run_id = $1 ORDER BY r.id`,
+        [req.params.id]
+      );
+      res.json({ ...run, respuestas, evidencias, verificaciones_ia: verificacionesIa, revisiones });
     } catch (err) {
       res.status(500).json({ error: err.message });
+    }
+  });
+
+  // Corrige el valor de un ítem DESPUÉS de finalizada la auditoría (ej: la
+  // IA no aprobó una foto que a criterio de un Admin/Auditor sí cumple) y
+  // recalcula puntaje/semáforo/resultado al toque - no hace falta reabrir
+  // la auditoría. Mientras está EN_PROGRESO se sigue editando con el PUT
+  // normal (.../respuestas/:itemId); este es solo para después de cerrada.
+  // Queda registrado quién revisó y qué cambió (audit_respuesta_revisiones).
+  app.put('/api/runs/:id/respuestas/:itemId/revision', async (req, res) => {
+    if (req.usuario.rol !== 'ADMIN' && req.usuario.rol !== 'AUDITOR') {
+      return res.status(403).json({ error: 'Solo Administrador o Auditor pueden revisar respuestas de una auditoría ya finalizada' });
+    }
+    const run = await obtenerRunOForbidden(req, res);
+    if (!run) return;
+    if (run.estado !== 'COMPLETADA') return res.status(400).json({ error: 'Esto es para corregir una auditoría ya finalizada - mientras está en progreso, se edita con el autoguardado normal' });
+    const itemId = Number(req.params.itemId);
+    const item = (run.estructura_snapshot.items || []).find((i) => i.id === itemId);
+    if (!item) return res.status(404).json({ error: 'Ítem no encontrado en esta auditoría' });
+    try {
+      const { rows: anteriorRows } = await db.query('SELECT * FROM audit_respuestas WHERE run_id = $1 AND item_id = $2', [req.params.id, itemId]);
+      const valorNuevoJson = req.body.valor_json == null ? null : JSON.stringify(req.body.valor_json);
+      const { rows: respuestaRows } = await db.query(
+        `INSERT INTO audit_respuestas (run_id, item_id, valor_json) VALUES ($1,$2,$3)
+         ON CONFLICT (run_id, item_id) DO UPDATE SET valor_json = EXCLUDED.valor_json, actualizado_en = now()
+         RETURNING *`,
+        [req.params.id, itemId, valorNuevoJson]
+      );
+      await db.query(
+        `INSERT INTO audit_respuesta_revisiones (run_id, item_id, usuario_id, valor_anterior, valor_nuevo) VALUES ($1,$2,$3,$4,$5)`,
+        [req.params.id, itemId, req.usuario.usuarioId, anteriorRows[0] ? JSON.stringify(anteriorRows[0].valor_json) : null, valorNuevoJson]
+      );
+
+      // Mismo recálculo que al finalizar (ver más abajo), con las
+      // respuestas ya actualizadas.
+      const { rows: respuestas } = await db.query('SELECT * FROM audit_respuestas WHERE run_id = $1', [req.params.id]);
+      const semaforoConfig = (await db.query('SELECT * FROM semaforo_config ORDER BY orden')).rows;
+      const estructura = run.estructura_snapshot;
+      const resultadoCalculo = calcularPuntaje({
+        sectores: estructura.sectores, areas: estructura.areas, items: estructura.items,
+        respuestas, umbrales: estructura.umbrales, semaforoConfig,
+        puntajeMinimoAprobacion: estructura.puntaje_minimo_aprobacion,
+      });
+      const { rows: runActualizado } = await db.query(
+        `UPDATE audit_runs SET puntaje_total = $1, semaforo = $2, resultado = $3, detalle_calculo = $4 WHERE id = $5 RETURNING *`,
+        [resultadoCalculo.puntajeTotal, resultadoCalculo.semaforo, resultadoCalculo.resultado, JSON.stringify(resultadoCalculo.detalle), req.params.id]
+      );
+      res.json({ run: runActualizado[0], respuesta: respuestaRows[0] });
+    } catch (err) {
+      res.status(400).json({ error: err.message });
     }
   });
 

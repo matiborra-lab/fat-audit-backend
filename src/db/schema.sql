@@ -241,10 +241,12 @@ CREATE INDEX idx_evidencias_respuesta ON evidencias (respuesta_id);
 
 -- Registro de cada intento de verificación por IA de un ítem con
 -- verificacion_ia (ver src/ia/verificacionFoto.js) - una fila por foto
--- analizada, no solo la última: permite contar intentos y saber en el
--- resumen final qué ítems quedaron sin aprobar (forzado = true, el auditor
--- decidió continuar sin que la IA diera el visto bueno). item_id apunta al
--- id DENTRO del snapshot, igual que audit_respuestas.item_id.
+-- analizada, no solo la última (permite contar intentos). La foto se sube
+-- SIEMPRE, la apruebe o no - no bloquea guardar/finalizar la auditoría; el
+-- aviso a los gerentes al finalizar mira el último intento de cada ítem.
+-- `forzado` es historico (ya no se escribe desde el endpoint, quedó de una
+-- version anterior con reintentos obligatorios). item_id apunta al id
+-- DENTRO del snapshot, igual que audit_respuestas.item_id.
 CREATE TABLE verificaciones_ia (
   id         SERIAL PRIMARY KEY,
   run_id     INTEGER NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
@@ -255,6 +257,22 @@ CREATE TABLE verificaciones_ia (
   creado_en  TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 CREATE INDEX idx_verificaciones_ia_run ON verificaciones_ia (run_id);
+
+-- Correcciones manuales de una respuesta DESPUÉS de finalizada la auditoría
+-- (ver PUT /api/runs/:id/respuestas/:itemId/revision) - típicamente cuando
+-- un Admin/Auditor revisa una foto que la IA no aprobó y, a su criterio,
+-- sí cumple. Cada fila es un cambio puntual (no un historial completo de
+-- toda la respuesta); el puntaje de la auditoría se recalcula al toque.
+CREATE TABLE audit_respuesta_revisiones (
+  id              SERIAL PRIMARY KEY,
+  run_id          INTEGER NOT NULL REFERENCES audit_runs(id) ON DELETE CASCADE,
+  item_id         INTEGER NOT NULL,
+  usuario_id      INTEGER NOT NULL REFERENCES usuarios(id) ON DELETE RESTRICT,
+  valor_anterior  JSONB,
+  valor_nuevo     JSONB,
+  creado_en       TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+CREATE INDEX idx_audit_respuesta_revisiones_run ON audit_respuesta_revisiones (run_id);
 
 -- Semaforo editable (hoy seedeado con los 5 tramos de la spec) - preparado
 -- para que una futura pantalla de Configuracion lo edite sin tocar el schema.
