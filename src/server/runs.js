@@ -354,19 +354,17 @@ module.exports = function registrarRutasRuns(app) {
   // Verificación por IA de una foto para un ítem que la exige
   // (audit_items.verificacion_ia) - a diferencia de /evidencia, el archivo
   // viaja crudo en el body (como /api/storage/subir): la API analiza los
-  // bytes directo, sin ir a buscarlos al bucket. Si la IA aprueba, la foto
-  // se sube y queda como evidencia normal; si no aprueba, se descarta (no
-  // se sube) y el ítem sigue pendiente para que el auditor la vuelva a
-  // sacar. `forzar=1` salta el análisis - el auditor ya insistió varias
-  // veces y decide continuar igual: la foto se sube pero el intento queda
-  // marcado como no verificado (se avisa a los gerentes al finalizar, ver
-  // /api/runs/:id/finalizar).
+  // bytes directo, sin ir a buscarlos al bucket. La foto se sube SIEMPRE,
+  // la apruebe la IA o no - no tiene sentido bloquear que se guarde/cierre
+  // la auditoría por esto, y el auditor tiene que poder avanzar aunque un
+  // punto quede sin aprobar. Si no aprueba, se guarda igual el intento con
+  // aprobado=false: eso es lo que dispara el aviso a los gerentes al
+  // finalizar (ver /api/runs/:id/finalizar).
   app.post('/api/runs/:id/verificar-foto', express.raw({ type: 'image/*', limit: '15mb' }), async (req, res) => {
     const run = await obtenerRunOForbidden(req, res);
     if (!run) return;
     if (run.estado !== 'EN_PROGRESO') return res.status(400).json({ error: 'Esta auditoría ya no está en progreso' });
     const itemId = Number(req.query.item_id);
-    const forzar = req.query.forzar === '1';
     const item = (run.estructura_snapshot.items || []).find((i) => i.id === itemId);
     if (!item) return res.status(404).json({ error: 'Ítem no encontrado en esta auditoría' });
     if (!item.verificacion_ia) return res.status(400).json({ error: 'Este ítem no tiene verificación por IA' });
@@ -378,31 +376,21 @@ module.exports = function registrarRutasRuns(app) {
       const intentos = previos[0].n + 1;
 
       let resultado;
-      if (forzar) {
-        resultado = { aprobado: false, razon: 'El auditor continuó sin que la IA aprobara la foto.' };
-      } else {
-        try {
-          resultado = await verificarFoto({ criterio: item.criterio_ia, itemTexto: item.texto, imageBuffer: req.body, contentType });
-        } catch (err) {
-          if (err instanceof ErrorConfiguracionIA) {
-            // Sin configurar: no es un intento real, no se guarda - el
-            // frontend sube la foto directo, como si el ítem no exigiera IA.
-            return res.json({ aprobado: null, razon: err.message, intentos: 0 });
-          }
-          throw err;
+      try {
+        resultado = await verificarFoto({ criterio: item.criterio_ia, itemTexto: item.texto, imageBuffer: req.body, contentType });
+      } catch (err) {
+        if (err instanceof ErrorConfiguracionIA) {
+          // Sin configurar: no es un intento real, no se guarda - el
+          // frontend sube la foto directo, como si el ítem no exigiera IA.
+          return res.json({ aprobado: null, razon: err.message, intentos: 0 });
         }
+        throw err;
       }
 
       await db.query(
-        'INSERT INTO verificaciones_ia (run_id, item_id, aprobado, razon, forzado) VALUES ($1,$2,$3,$4,$5)',
-        [req.params.id, itemId, resultado.aprobado, resultado.razon, forzar]
+        'INSERT INTO verificaciones_ia (run_id, item_id, aprobado, razon) VALUES ($1,$2,$3,$4)',
+        [req.params.id, itemId, resultado.aprobado, resultado.razon]
       );
-
-      if (!resultado.aprobado && !forzar) {
-        // Se descarta la foto rechazada (no vale la pena guardarla en el
-        // bucket) y el ítem sigue sin evidencia.
-        return res.json({ aprobado: false, razon: resultado.razon, intentos });
-      }
 
       const subida = await subirDesdeServidor({ buffer: req.body, contentType, carpeta: 'auditorias', runId: req.params.id });
       const { rows: respuestaRows } = await db.query(
@@ -414,7 +402,7 @@ module.exports = function registrarRutasRuns(app) {
         `INSERT INTO evidencias (respuesta_id, tipo, url) VALUES ($1,'FOTO',$2) RETURNING *`,
         [respuestaRows[0].id, subida.publicUrl]
       );
-      res.status(201).json({ aprobado: resultado.aprobado, razon: resultado.razon, forzado: forzar, intentos, evidencia: evidenciaRows[0] });
+      res.status(201).json({ aprobado: resultado.aprobado, razon: resultado.razon, intentos, evidencia: evidenciaRows[0] });
     } catch (err) {
       res.status(400).json({ error: err.message });
     }
@@ -471,16 +459,22 @@ module.exports = function registrarRutasRuns(app) {
           JSON.stringify(resultadoCalculo.detalle), firma_nombre || null, firma_responsable || null, req.params.id]
       );
 
-      // Ítems que el auditor continuó sin que la IA los aprobara (ver
-      // POST /api/runs/:id/verificar-foto, forzar=1) - se avisa a los
-      // gerentes activos de la sucursal para que los revisen ellos mismos.
-      const { rows: forzados } = await db.query(
-        'SELECT DISTINCT item_id FROM verificaciones_ia WHERE run_id = $1 AND forzado = true',
+      // Ítems cuyo ÚLTIMO intento de foto no lo aprobó la IA (si el auditor
+      // reintentó y finalmente la aprobó, no cuenta - DISTINCT ON con orden
+      // descendente por id se queda con el intento más reciente de cada
+      // ítem) - se avisa a los gerentes activos de la sucursal para que los
+      // revisen ellos mismos.
+      const { rows: noAprobados } = await db.query(
+        `SELECT item_id FROM (
+           SELECT DISTINCT ON (item_id) item_id, aprobado
+           FROM verificaciones_ia WHERE run_id = $1
+           ORDER BY item_id, id DESC
+         ) ultimo_intento WHERE aprobado = false`,
         [req.params.id]
       );
-      if (forzados.length > 0) {
-        const itemIdsForzados = new Set(forzados.map((f) => f.item_id));
-        const nombresItems = estructura.items.filter((it) => itemIdsForzados.has(it.id)).map((it) => it.texto);
+      if (noAprobados.length > 0) {
+        const itemIdsNoAprobados = new Set(noAprobados.map((f) => f.item_id));
+        const nombresItems = estructura.items.filter((it) => itemIdsNoAprobados.has(it.id)).map((it) => it.texto);
         const { rows: gerentes } = await db.query(
           `SELECT id FROM usuarios WHERE activo = true AND sucursal_id = $1 AND rol = 'GERENTE'`,
           [run.sucursal_id]

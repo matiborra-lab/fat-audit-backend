@@ -22,7 +22,7 @@ const db = require('../db');
 const { crearNotificacion } = require('../server/notificaciones');
 const { obtenerPronostico } = require('../clima');
 
-const INTERVALO_CHEQUEO_MS = 30 * 60 * 1000; // 30 minutos
+const INTERVALO_CHEQUEO_MS = 5 * 60 * 1000; // 5 minutos - lo suficientemente seguido como para que el aviso de "pendiente vencida" (ver más abajo, umbral de 15 min) no llegue con demasiado retraso
 const ZONA = 'America/Argentina/Buenos_Aires';
 
 const ANTICIPACION_HORAS_DEFAULT = { RECORDATORIO_TAREA: 1, RECORDATORIO_AUDITORIA: 24, RECORDATORIO_EVENTO_ESPECIAL: 24 };
@@ -260,6 +260,48 @@ async function verificarRecordatoriosClima() {
   }
 }
 
+// ------------------------------------------------------------
+// 4) Pendiente vencida - Tarea/Auditoría/Seguimiento cuya hora programada
+// ya pasó hace más de 15 minutos y el responsable ni la empezó (estado
+// sigue PENDIENTE: /api/calendario/:id/iniciar pasa la auditoría a
+// COMPLETADA en el schedule_event apenas arranca, y "completar" hace lo
+// mismo con una tarea - ver calendario.js). A diferencia del recordatorio
+// de evento (1), este SIEMPRE se manda, sin importar notificacion_preferencias:
+// es un aviso de incumplimiento (evitar que quede una tarea/auditoría
+// asignada sin hacer), no una comodidad que tenga sentido poder apagar.
+// Una sola vez por evento (dedup en recordatorios_enviados, igual que el resto).
+// ------------------------------------------------------------
+const MINUTOS_AVISO_PENDIENTE_VENCIDA = 15;
+// Techo: pasado este tiempo ya no se avisa - es un aviso de "se te está por
+// pasar", no una resurrección de pendientes viejos/abandonados de hace
+// días (con solo el piso de 15 min, un evento sin hacer de hace una semana
+// dispararía igual el primer chequeo después de este deploy).
+const HORAS_TOPE_AVISO_PENDIENTE_VENCIDA = 3;
+
+async function verificarPendientesVencidas() {
+  const { rows: eventos } = await db.query(
+    `SELECT se.id, se.tipo, se.sucursal_id, se.fecha_hora, se.responsable_user_id, se.titulo, s.nombre AS sucursal_nombre
+     FROM schedule_events se JOIN sucursales s ON s.id = se.sucursal_id
+     WHERE se.tipo IN ('TAREA', 'AUDITORIA', 'SEGUIMIENTO') AND se.estado = 'PENDIENTE'
+       AND se.responsable_user_id IS NOT NULL
+       AND (se.tipo != 'TAREA' OR se.hora_definida)
+       AND se.fecha_hora <= now() - interval '${MINUTOS_AVISO_PENDIENTE_VENCIDA} minutes'
+       AND se.fecha_hora >= now() - interval '${HORAS_TOPE_AVISO_PENDIENTE_VENCIDA} hours'`
+  );
+  for (const e of eventos) {
+    try {
+      const tipo = 'PENDIENTE_VENCIDA';
+      if (await yaEnviado({ scheduleEventId: e.id, usuarioId: e.responsable_user_id, tipo })) continue;
+      const hora = new Date(e.fecha_hora).toLocaleTimeString('es-AR', { hour: '2-digit', minute: '2-digit', hour12: false, timeZone: ZONA });
+      const cuerpo = `Todavía no hiciste ${ETIQUETA_TIPO_EVENTO[e.tipo]} de las ${hora} en ${e.sucursal_nombre}: ${e.titulo}.`;
+      await crearNotificacion(e.responsable_user_id, 'RECORDATORIO', 'Pendiente sin realizar', cuerpo, { evento_id: e.id, sucursal_id: e.sucursal_id });
+      await marcarEnviado({ scheduleEventId: e.id, usuarioId: e.responsable_user_id, tipo });
+    } catch (err) {
+      console.error(`[recordatorios] error avisando pendiente vencida ${e.id}:`, err.message);
+    }
+  }
+}
+
 async function verificarRecordatorios() {
   try {
     await verificarRecordatoriosDeEvento();
@@ -275,6 +317,11 @@ async function verificarRecordatorios() {
     await verificarRecordatoriosClima();
   } catch (err) {
     console.error('[recordatorios] error verificando clima:', err.message);
+  }
+  try {
+    await verificarPendientesVencidas();
+  } catch (err) {
+    console.error('[recordatorios] error verificando pendientes vencidas:', err.message);
   }
 }
 
