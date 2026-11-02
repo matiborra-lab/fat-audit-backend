@@ -342,6 +342,11 @@ CREATE TABLE schedule_events (
 CREATE INDEX idx_schedule_events_sucursal_fecha ON schedule_events (sucursal_id, fecha_hora);
 CREATE INDEX idx_schedule_events_serie ON schedule_events (serie_id);
 CREATE INDEX idx_schedule_events_responsable ON schedule_events (responsable_user_id);
+-- Una persona no puede estar dos veces en el mismo turno (mismo día en huso
+-- Argentina + DIURNO/NOCTURNO), ni en puestos distintos - ver
+-- fechasConTurnoOcupado en server/calendario.js (el chequeo con mensaje claro).
+CREATE UNIQUE INDEX uq_turno_persona_dia ON schedule_events (responsable_user_id, turno_tipo, ((fecha_hora AT TIME ZONE 'America/Argentina/Buenos_Aires')::date))
+  WHERE tipo = 'TURNO' AND responsable_user_id IS NOT NULL;
 
 -- Catalogo de tareas rutinarias (tipo -> tareas), administrable por Admin en
 -- Configuracion - una TAREA del calendario puede salir de este catalogo

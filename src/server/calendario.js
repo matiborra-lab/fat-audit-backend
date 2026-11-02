@@ -532,6 +532,12 @@ module.exports = function registrarRutasCalendario(app) {
       && responsable_user_id !== undefined && Number(responsable_user_id) !== evento.responsable_user_id;
     try {
       await validarResponsablePermitido(req.usuario, responsable_user_id);
+      if (evento.tipo === 'TURNO' && responsable_user_id && Number(responsable_user_id) !== evento.responsable_user_id) {
+        const clave = claveDiaLocal(new Date(evento.fecha_hora));
+        if ((await fechasConTurnoOcupado(Number(responsable_user_id), evento.turno_tipo, [clave], evento.id)).size) {
+          return res.status(409).json({ error: `${await nombreDeUsuario(responsable_user_id)} ya está asignado/a a este turno ese día` });
+        }
+      }
       const { rows } = await db.query(
         `UPDATE schedule_events SET titulo = COALESCE($1,titulo), descripcion = COALESCE($2,descripcion),
          responsable_user_id = COALESCE($3,responsable_user_id), fecha_hora = COALESCE($4,fecha_hora),
@@ -668,6 +674,33 @@ module.exports = function registrarRutasCalendario(app) {
   // acá solo se elige día y DIURNO/NOCTURNO (ver obtenerHorariosSucursal).
   // ------------------------------------------------------------
 
+  // Una persona no puede estar dos veces en el mismo turno (mismo día y
+  // DIURNO/NOCTURNO), ni siquiera en puestos distintos - ver también el
+  // índice único uq_turno_persona_dia, que lo garantiza aunque dos pedidos
+  // lleguen a la vez. Devuelve las fechas (YYYY-MM-DD, huso Argentina) de
+  // `fechas` en las que `usuarioId` YA tiene ese turno.
+  async function fechasConTurnoOcupado(usuarioId, turnoTipo, fechas, excluirEventoId = null) {
+    if (!fechas.length) return new Set();
+    const { rows } = await db.query(
+      `SELECT DISTINCT (fecha_hora AT TIME ZONE 'America/Argentina/Buenos_Aires')::date::text AS dia
+       FROM schedule_events
+       WHERE tipo = 'TURNO' AND responsable_user_id = $1 AND turno_tipo = $2
+         AND (fecha_hora AT TIME ZONE 'America/Argentina/Buenos_Aires')::date::text = ANY($3)
+         AND ($4::int IS NULL OR id <> $4)`,
+      [usuarioId, turnoTipo, fechas, excluirEventoId]
+    );
+    return new Set(rows.map((r) => r.dia));
+  }
+
+  async function nombreDeUsuario(usuarioId) {
+    const { rows } = await db.query(`SELECT ${db.nombreCompletoSql('u')} AS nombre FROM usuarios u WHERE u.id = $1`, [usuarioId]);
+    return rows[0]?.nombre || 'Esta persona';
+  }
+
+  function claveDiaLocal(d) {
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  }
+
   async function obtenerSucursalOError(sucursalId) {
     const { rows } = await db.query('SELECT * FROM sucursales WHERE id = $1', [sucursalId]);
     if (!rows[0]) { const e = new Error('Sucursal no encontrada'); e.status = 404; throw e; }
@@ -694,6 +727,9 @@ module.exports = function registrarRutasCalendario(app) {
       const horarios = await obtenerHorariosSucursal(sucursal_id);
       const horario = horarios.get(`${diaSemanaDeFecha(fecha)}|${turno_tipo}`);
       if (!horario?.habilitado) return res.status(400).json({ error: 'Este turno no está habilitado ese día para esta sucursal (configuralo en la ficha de la sucursal)' });
+      if ((await fechasConTurnoOcupado(responsable_user_id, turno_tipo, [fecha])).size) {
+        return res.status(409).json({ error: `${await nombreDeUsuario(responsable_user_id)} ya está asignado/a a este turno ese día` });
+      }
       const { inicio, duracionMinutos } = armarOcurrencia(new Date(`${fecha}T00:00:00`), horario);
       const { rows } = await db.query(
         `INSERT INTO schedule_events (sucursal_id, tipo, titulo, responsable_user_id, puesto, turno_tipo, fecha_hora, duracion_minutos, creado_por, asignacion_confirmada)
@@ -702,6 +738,8 @@ module.exports = function registrarRutasCalendario(app) {
       );
       res.status(201).json(rows[0]);
     } catch (err) {
+      // 23505: el índice único (doble toque al "Agregar", dos pedidos a la vez)
+      if (err.code === '23505') return res.status(409).json({ error: 'Esa persona ya está asignada a este turno ese día' });
       res.status(err.status || 400).json({ error: err.message });
     }
   });
@@ -731,8 +769,15 @@ module.exports = function registrarRutasCalendario(app) {
         return res.status(400).json({ error: 'Ninguno de los días elegidos tiene este turno habilitado en esta sucursal (configuralo en la ficha de la sucursal)' });
       }
 
-      const ocurrencias = generarOcurrenciasTurnoProgramado(fecha_desde, fecha_hasta || null, diasHabilitados, horarios, turno_tipo);
-      if (!ocurrencias.length) return res.status(400).json({ error: 'El rango de fechas no incluye ninguno de los días elegidos' });
+      const todasLasOcurrencias = generarOcurrenciasTurnoProgramado(fecha_desde, fecha_hasta || null, diasHabilitados, horarios, turno_tipo);
+      if (!todasLasOcurrencias.length) return res.status(400).json({ error: 'El rango de fechas no incluye ninguno de los días elegidos' });
+      // Los días en que esa persona ya tiene este turno se saltean (no se
+      // duplica) - si no queda ninguno nuevo, no hay nada para crear.
+      const ocupados = await fechasConTurnoOcupado(responsable_user_id, turno_tipo, todasLasOcurrencias.map((o) => claveDiaLocal(o.inicio)));
+      const ocurrencias = todasLasOcurrencias.filter((o) => !ocupados.has(claveDiaLocal(o.inicio)));
+      if (!ocurrencias.length) {
+        return res.status(409).json({ error: `${await nombreDeUsuario(responsable_user_id)} ya tiene este turno asignado en todos esos días` });
+      }
       const filas = ocurrencias.map(({ inicio, duracionMinutos }) => [
         sucursal_id, 'TURNO', `Turno ${turno_tipo === 'DIURNO' ? 'diurno' : 'nocturno'}`, responsable_user_id, puesto, turno_tipo,
         inicio.toISOString(), duracionMinutos, req.usuario.usuarioId, false,
@@ -747,6 +792,7 @@ module.exports = function registrarRutasCalendario(app) {
         creados: insertados.length,
         ventanaSinFin: !fecha_hasta ? DIAS_VENTANA_SIN_FIN : null,
         diasOmitidos: diasOmitidos.length ? diasOmitidos : undefined,
+        omitidosPorDuplicado: ocupados.size || undefined,
       });
     } catch (err) {
       res.status(err.status || 400).json({ error: err.message });
