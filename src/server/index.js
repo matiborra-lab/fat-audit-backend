@@ -255,17 +255,22 @@ app.post('/api/sucursales', requireAdmin, async (req, res) => {
 
 app.patch('/api/sucursales/:id', requireAdmin, async (req, res) => {
   const { nombre, codigo, direccion, activo, latitud, longitud } = req.body;
+  // A diferencia del resto, el teléfono tiene que poder BORRARSE: se
+  // distingue "no vino" de "vino vacío" (solo dígitos, o null si no queda ninguno).
+  const tieneTelefono = Object.prototype.hasOwnProperty.call(req.body, 'telefono_administrativo');
+  const telefono = String(req.body.telefono_administrativo ?? '').replace(/\D/g, '') || null;
   try {
     const { rows } = await db.query(
       `UPDATE sucursales SET nombre = COALESCE($1,nombre), codigo = COALESCE($2,codigo),
        direccion = COALESCE($3,direccion), activo = COALESCE($4,activo),
-       latitud = COALESCE($5,latitud), longitud = COALESCE($6,longitud)
+       latitud = COALESCE($5,latitud), longitud = COALESCE($6,longitud),
+       telefono_administrativo = CASE WHEN $8 THEN $9 ELSE telefono_administrativo END
        WHERE id = $7 RETURNING *`,
       // codigo/direccion son opcionales - un '' del formulario (campo vacío)
       // se trata igual que "no lo mandó" (COALESCE lo conserva), en vez de
       // pisar la columna con '' y chocar con la unique de sucursales.codigo
       // si otra sucursal ya tiene código vacío.
-      [nombre ?? null, codigo || null, direccion || null, activo ?? null, latitud ?? null, longitud ?? null, req.params.id]
+      [nombre ?? null, codigo || null, direccion || null, activo ?? null, latitud ?? null, longitud ?? null, req.params.id, tieneTelefono, telefono]
     );
     if (!rows[0]) return res.status(404).json({ error: 'Sucursal no encontrada' });
     res.json(rows[0]);

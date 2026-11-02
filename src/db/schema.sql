@@ -11,6 +11,7 @@ CREATE TABLE sucursales (
   activo                BOOLEAN NOT NULL DEFAULT true,
   latitud               NUMERIC(9,6),   -- opcionales - sin coordenadas simplemente no se muestra clima (ver src/clima)
   longitud              NUMERIC(9,6),
+  telefono_administrativo TEXT,         -- WhatsApp de quien administra/paga la mercadería (con código de área, sin 0 ni 15) - lo usa "Enviar saldo" en Mercadería FAT > Reportes
   creado_en             TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 
